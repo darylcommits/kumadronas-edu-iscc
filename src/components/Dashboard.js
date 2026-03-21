@@ -1,0 +1,3258 @@
+// Dashboard.js - FIXED VERSION WITH:
+// 1. Proper individual booking approval status in calendar
+// 2. Working system logs from duty_logs table
+// 3. Fixed admin notifications
+import React, { useState, useEffect } from 'react';
+import { supabase, dbHelpers } from '../lib/supabase';
+import {
+  Chart as ChartJS,
+  CategoryScale,
+  LinearScale,
+  BarElement,
+  LineElement,
+  PointElement,
+  ArcElement,
+  Title,
+  Tooltip,
+  Legend,
+} from 'chart.js';
+import { Bar, Line, Pie } from 'react-chartjs-2';
+import StudentManagement from './StudentManagement';
+import ReportsAnalytics from './ReportsAnalytics';
+import ProfileSettings from './ProfileSettings';
+import ScheduleManagement from './ScheduleManagement';
+import UserManagement from './UserManagement';
+import { useToast, ToastContainer } from './Toast';
+import {
+  Calendar,
+  Users,
+  Clock,
+  Bell,
+  LogOut,
+  Menu,
+  X,
+  Check,
+  User,
+  Shield,
+  Eye,
+  Plus,
+  ChevronLeft,
+  ChevronRight,
+  Activity,
+  Ban,
+  Settings,
+  Home,
+  Star,
+  Calendar as CalendarIcon,
+  CheckCircle,
+  XCircle,
+  Info,
+  BarChart3,
+  Trash2,
+  Printer,
+  Award,
+  Filter,
+  AlertTriangle
+} from 'lucide-react';
+
+ChartJS.register(
+  CategoryScale,
+  LinearScale,
+  BarElement,
+  LineElement,
+  PointElement,
+  ArcElement,
+  Title,
+  Tooltip,
+  Legend
+);
+
+const Dashboard = ({ user, session, onProfileUpdate }) => {
+  const [activeTab, setActiveTab] = useState('dashboard');
+  const [schedules, setSchedules] = useState([]);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [notifications, setNotifications] = useState([]);
+  const [unreadCount, setUnreadCount] = useState(0);
+  const [pendingSignupsCount, setPendingSignupsCount] = useState(0);
+  const [showNotifications, setShowNotifications] = useState(false);
+  const [currentDate, setCurrentDate] = useState(new Date());
+  const [selectedHospital, setSelectedHospital] = useState('all');
+  const [studentDuties, setStudentDuties] = useState([]);
+  const [childDuties, setChildDuties] = useState([]);
+  const [dashboardStats, setDashboardStats] = useState({});
+  const [chartData, setChartData] = useState({
+    locationDistribution: {},
+    bookingTrends: {},
+    approvalStatus: {}
+  });
+  const [pendingBookings, setPendingBookings] = useState([]);
+  const [showRejectConfirm, setShowRejectConfirm] = useState(false);
+  const [scheduleToReject, setScheduleToReject] = useState(null);
+  const [studentToReject, setStudentToReject] = useState(null);
+  const [dailyCancellations, setDailyCancellations] = useState(new Set());
+  const [showUserMenu, setShowUserMenu] = useState(false);
+  const [showLogoutModal, setShowLogoutModal] = useState(false);
+  const [bookingToConfirm, setBookingToConfirm] = useState(null); // { scheduleId, date }
+  const [approveToConfirm, setApproveToConfirm] = useState(null); // { scheduleId, scheduleStudentId, studentName }
+  const [approveAllToConfirm, setApproveAllToConfirm] = useState(null); // { scheduleId, studentCount }
+  // FIXED: Add state for system logs
+  const [systemLogs, setSystemLogs] = useState([]);
+
+  // Role helper — co-admin has the same access as admin
+  const isAdmin = user?.role === 'admin' || user?.role === 'co-admin';
+
+  // Toast notifications
+  const { toasts, removeToast, success, error, warning } = useToast();
+
+  useEffect(() => {
+    initializeDashboard();
+
+    // Set up real-time subscriptions
+    const notificationChannel = supabase
+      .channel('notifications')
+      .on('postgres_changes',
+        { event: 'INSERT', schema: 'public', table: 'notifications', filter: `user_id=eq.${user.id}` },
+        (payload) => {
+          setNotifications(prev => [payload.new, ...prev]);
+          setUnreadCount(prev => prev + 1);
+        }
+      )
+      .subscribe();
+
+    const scheduleChannel = supabase
+      .channel('schedules')
+      .on('postgres_changes',
+        { event: '*', schema: 'public', table: 'schedules' },
+        () => {
+          fetchSchedules();
+          fetchPendingBookings();
+        }
+      )
+      .subscribe();
+
+    const scheduleStudentsChannel = supabase
+      .channel('schedule_students')
+      .on('postgres_changes',
+        { event: '*', schema: 'public', table: 'schedule_students' },
+        () => {
+          fetchSchedules();
+          fetchPendingBookings();
+          if (user?.role === 'student') {
+            fetchStudentDuties();
+          }
+          if (user?.role === 'parent') {
+            fetchChildDuties();
+          }
+        }
+      )
+      .subscribe();
+
+    // FIXED: Add real-time subscription for duty logs
+    const dutyLogsChannel = supabase
+      .channel('duty_logs')
+      .on('postgres_changes',
+        { event: 'INSERT', schema: 'public', table: 'duty_logs' },
+        () => {
+          if (isAdmin) {
+            fetchSystemLogs();
+          }
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(notificationChannel);
+      supabase.removeChannel(scheduleChannel);
+      supabase.removeChannel(scheduleStudentsChannel);
+      supabase.removeChannel(dutyLogsChannel);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user]);
+
+  // Prevent body scroll when mobile sidebar is open
+  useEffect(() => {
+    if (sidebarOpen && window.innerWidth < 1024) {
+      document.body.classList.add('sidebar-open');
+      document.body.style.overflow = 'hidden';
+    } else {
+      document.body.classList.remove('sidebar-open');
+      document.body.style.overflow = '';
+    }
+
+    // Cleanup on unmount
+    return () => {
+      document.body.classList.remove('sidebar-open');
+      document.body.style.overflow = '';
+    };
+  }, [sidebarOpen]);
+
+  const initializeDashboard = async () => {
+    // Run all fetches in background, don't block UI
+    Promise.all([
+      fetchSchedules(),
+      fetchNotifications(),
+      fetchDashboardStats(),
+      fetchPendingBookings(),
+      fetchChartData(),
+      user?.role === 'student' && fetchStudentDuties(),
+      user?.role === 'parent' && fetchChildDuties(),
+      isAdmin && fetchSystemLogs(), // FIXED: Fetch system logs for admin
+      isAdmin && fetchPendingCount()
+    ]);
+  };
+
+  // FIXED: Add function to fetch system logs from duty_logs table
+  const fetchSystemLogs = async () => {
+    try {
+      console.log('Fetching system logs from duty_logs table...');
+      const { data, error } = await supabase
+        .from('duty_logs')
+        .select(`
+          *,
+          performed_by_profile:profiles!performed_by (
+            id,
+            full_name,
+            email
+          ),
+          target_user_profile:profiles!target_user (
+            id,
+            full_name,
+            email
+          ),
+          schedule_students (
+            id,
+            schedules (
+              date,
+              location,
+              description
+            )
+          )
+        `)
+        .order('created_at', { ascending: false })
+        .limit(100);
+
+      if (error) {
+        console.error('Error fetching system logs:', error);
+        return;
+      }
+
+      console.log('System logs fetched:', data);
+      setSystemLogs(data || []);
+    } catch (error) {
+      console.error('Error fetching system logs:', error);
+    }
+  };
+
+  const fetchChartData = async () => {
+    try {
+      // Location distribution
+      const { data: locationData } = await supabase
+        .from('schedules')
+        .select('location')
+        .not('location', 'is', null);
+
+      const locationCounts = locationData?.reduce((acc, curr) => {
+        acc[curr.location] = (acc[curr.location] || 0) + 1;
+        return acc;
+      }, {}) || {};
+
+      // Booking trends (last 7 days) — count new bookings by created_at date
+      const { data: bookingData } = await supabase
+        .from('schedule_students')
+        .select('created_at')
+        .gte('created_at', new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString());
+
+      const dateCounts = {};
+      const today = new Date();
+      for (let i = 6; i >= 0; i--) {
+        const date = new Date(today.getTime() - i * 24 * 60 * 60 * 1000);
+        const dateStr = date.toISOString().split('T')[0];
+        dateCounts[dateStr] = 0;
+      }
+
+      bookingData?.forEach(booking => {
+        const dateStr = new Date(booking.created_at).toISOString().split('T')[0];
+        if (Object.prototype.hasOwnProperty.call(dateCounts, dateStr)) {
+          dateCounts[dateStr]++;
+        }
+      });
+
+      // Approval status — count by schedule_students.status
+      const { data: approvalData } = await supabase
+        .from('schedule_students')
+        .select('status');
+
+      const statusCounts = approvalData?.reduce((acc, curr) => {
+        const s = curr.status || 'pending';
+        acc[s] = (acc[s] || 0) + 1;
+        return acc;
+      }, {}) || {};
+
+      setChartData({
+        locationDistribution: locationCounts,
+        bookingTrends: dateCounts,
+        approvalStatus: statusCounts
+      });
+    } catch (error) {
+      console.error('Error fetching chart data:', error);
+    }
+  };
+
+  // FIXED: Enhanced fetchSchedules with proper joins to get accurate student counts AND individual statuses
+  const fetchSchedules = async () => {
+    try {
+      console.log('Fetching schedules with student counts...');
+      const { data, error } = await supabase
+        .from('schedules')
+        .select(`
+          *,
+          schedule_students (
+            id,
+            student_id,
+            booking_time,
+            status,
+            cancelled_at,
+            profiles:student_id (
+              id,
+              full_name,
+              email,
+              student_number
+            )
+          )
+        `)
+        .order('date', { ascending: true });
+
+      if (error) {
+        console.error('Error fetching schedules:', error);
+        return;
+      }
+
+      // Filter out cancelled bookings and only count active ones
+      const processedSchedules = data?.map(schedule => ({
+        ...schedule,
+        schedule_students: schedule.schedule_students?.filter(ss => ss.status !== 'cancelled') || []
+      })) || [];
+
+      console.log('Processed schedules with student counts:', processedSchedules);
+      setSchedules(processedSchedules);
+    } catch (error) {
+      console.error('Error fetching schedules:', error);
+    }
+  };
+
+  // FIXED: System Logs View Component - now using actual duty_logs data
+  const renderSystemLogsView = () => (
+    <div className="space-y-6">
+      <div className="flex justify-between items-center">
+        <h2 className="text-2xl font-bold text-gray-900">System Logs</h2>
+        <div className="flex items-center space-x-3">
+          <button
+            onClick={fetchSystemLogs}
+            className="btn-secondary flex items-center space-x-2"
+          >
+            <Activity className="w-4 h-4" />
+            <span>Refresh</span>
+          </button>
+          <div className="text-sm text-gray-600">
+            Showing last 100 activities
+          </div>
+        </div>
+      </div>
+
+      <div className="card">
+        <div className="overflow-x-auto">
+          <table className="w-full">
+            <thead>
+              <tr className="border-b border-gray-200">
+                <th className="text-left p-3 text-xs font-medium text-gray-500 uppercase tracking-wider">Timestamp</th>
+                <th className="text-left p-3 text-xs font-medium text-gray-500 uppercase tracking-wider">Action</th>
+                <th className="text-left p-3 text-xs font-medium text-gray-500 uppercase tracking-wider">Performed By</th>
+                <th className="text-left p-3 text-xs font-medium text-gray-500 uppercase tracking-wider">Target User</th>
+                <th className="text-left p-3 text-xs font-medium text-gray-500 uppercase tracking-wider">Details</th>
+              </tr>
+            </thead>
+            <tbody>
+              {systemLogs.map((log) => (
+                <tr key={log.id} className="border-b border-gray-100 hover:bg-gray-50">
+                  <td className="p-3 text-sm text-gray-600">
+                    {new Date(log.created_at).toLocaleString()}
+                  </td>
+                  <td className="p-3">
+                    <span className={`inline-flex px-2 py-1 rounded-full text-xs font-medium ${log.action === 'login' ? 'bg-green-100 text-green-800' :
+                      log.action === 'logout' ? 'bg-gray-100 text-gray-800' :
+                        log.action === 'booked' ? 'bg-blue-100 text-blue-800' :
+                          log.action === 'approved' || log.action === 'approved_individual' || log.action === 'approved_all' ? 'bg-emerald-100 text-emerald-800' :
+                            log.action === 'rejected' || log.action === 'rejected_individual' || log.action === 'rejected_all' ? 'bg-red-100 text-red-800' :
+                              log.action === 'cancelled' ? 'bg-orange-100 text-orange-800' :
+                                'bg-yellow-100 text-yellow-800'
+                      }`}>
+                      {log.action.replace(/_/g, ' ').toUpperCase()}
+                    </span>
+                  </td>
+                  <td className="p-3 text-sm">
+                    <div>
+                      <div className="font-medium text-gray-900">{log.performed_by_profile?.full_name || 'System'}</div>
+                      <div className="text-gray-500 text-xs">{log.performed_by_profile?.email || 'N/A'}</div>
+                    </div>
+                  </td>
+                  <td className="p-3 text-sm">
+                    {log.target_user_profile ? (
+                      <div>
+                        <div className="font-medium text-gray-900">{log.target_user_profile.full_name}</div>
+                        <div className="text-gray-500 text-xs">{log.target_user_profile.email}</div>
+                      </div>
+                    ) : (
+                      <span className="text-gray-400">N/A</span>
+                    )}
+                  </td>
+                  <td className="p-3 text-sm text-gray-700">
+                    <div className="max-w-xs">
+                      <div className="truncate">{log.notes}</div>
+                      {log.schedule_students?.[0]?.schedules && (
+                        <div className="text-xs text-gray-500 mt-1">
+                          📅 {new Date(log.schedule_students[0].schedules.date).toLocaleDateString()}
+                          {log.schedule_students[0].schedules.location && ` • ${log.schedule_students[0].schedules.location}`}
+                        </div>
+                      )}
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+
+        {systemLogs.length === 0 && (
+          <div className="text-center py-12">
+            <Activity className="w-16 h-16 mx-auto mb-4 text-gray-300" />
+            <h3 className="text-lg font-medium text-gray-900 mb-2">No system logs yet</h3>
+            <p className="text-gray-600">System activities will appear here as they occur.</p>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+
+  const fetchPendingBookings = async () => {
+    try {
+      console.log('Fetching pending schedule approvals...');
+      const { data, error } = await supabase
+        .from('schedules')
+        .select(`
+          *,
+          schedule_students!inner (
+            id,
+            student_id,
+            booking_time,
+            status,
+            profiles:student_id (
+              id,
+              full_name,
+              email,
+              student_number,
+              year_level
+            )
+          )
+        `)
+        .eq('status', 'pending')
+        .eq('schedule_students.status', 'booked')
+        .order('date', { ascending: true });
+
+      if (error) {
+        console.error('Error fetching pending schedules:', error);
+        return;
+      }
+
+      console.log('Pending schedules with bookings:', data);
+
+      // Group schedules that have bookings awaiting approval
+      setPendingBookings(data || []);
+    } catch (error) {
+      console.error('Error fetching pending bookings:', error);
+    }
+  };
+
+  const fetchNotifications = async () => {
+    try {
+      const { data, error } = await supabase
+        .from('notifications')
+        .select('*')
+        .eq('user_id', user.id)
+        .order('created_at', { ascending: false });
+
+      if (error) throw error;
+      setNotifications(data || []);
+      setUnreadCount(data?.filter(n => !n.read).length || 0);
+    } catch (error) {
+      console.error('Error fetching notifications:', error);
+    }
+  };
+
+  const fetchPendingCount = async () => {
+    try {
+      const { count } = await supabase
+        .from('pending_registrations')
+        .select('*', { count: 'exact', head: true })
+        .eq('status', 'pending');
+      setPendingSignupsCount(count || 0);
+    } catch (error) {
+      console.error('Error fetching pending count:', error);
+    }
+  };
+
+  const fetchDashboardStats = async () => {
+    try {
+      if (isAdmin) {
+        const { data: totalStudents } = await supabase
+          .from('profiles')
+          .select('id', { count: 'exact' })
+          .eq('role', 'student');
+
+        const { data: pendingSchedules } = await supabase
+          .from('schedules')
+          .select('id', { count: 'exact' })
+          .eq('status', 'pending');
+
+        const { data: todayDuties } = await supabase
+          .from('schedule_students')
+          .select(`
+            id,
+            schedules!inner(date)
+          `)
+          .eq('schedules.date', new Date().toISOString().split('T')[0])
+          .eq('status', 'booked');
+
+        setDashboardStats({
+          totalStudents: totalStudents?.length || 0,
+          pendingApprovals: pendingSchedules?.length || 0,
+          todayDuties: todayDuties?.length || 0,
+          systemHealth: 'Excellent'
+        });
+      } else if (user.role === 'student') {
+        const { data: myDuties } = await supabase
+          .from('schedule_students')
+          .select('id')
+          .eq('student_id', user.id);
+
+        const { data: upcomingDuties } = await supabase
+          .from('schedule_students')
+          .select(`
+            schedules!inner(date)
+          `)
+          .eq('student_id', user.id)
+          .eq('status', 'booked')
+          .gte('schedules.date', new Date().toISOString().split('T')[0]);
+
+        setDashboardStats({
+          totalDuties: myDuties?.length || 0,
+          upcomingDuties: upcomingDuties?.length || 0,
+          completionRate: 85
+        });
+      }
+    } catch (error) {
+      console.error('Error fetching dashboard stats:', error);
+    }
+  };
+
+
+  const fetchStudentDuties = async () => {
+    try {
+      const data = await dbHelpers.getStudentDuties(user.id);
+      setStudentDuties(data || []);
+    } catch (error) {
+      console.error('Error fetching student duties:', error);
+    }
+  };
+
+  const fetchChildDuties = async () => {
+    try {
+      console.log('Fetching child duties for parent:', user.id);
+      const data = await dbHelpers.getChildDuties(user.id);
+      console.log('Child duties fetched:', data);
+      setChildDuties(data || []);
+    } catch (error) {
+      console.error('Error fetching child duties:', error);
+    }
+  };
+
+  const handleSignOut = () => {
+    setShowLogoutModal(true);
+    setShowUserMenu(false);
+  };
+
+  const confirmSignOut = async () => {
+    setShowLogoutModal(false);
+    try {
+      await supabase.from('duty_logs').insert({
+        action: 'logout',
+        performed_by: user.id,
+        notes: `User ${user.full_name} logged out`
+      });
+      await supabase.auth.signOut();
+    } catch (error) {
+      console.error('Error during logout:', error);
+    }
+  };
+
+  const handleNotificationClick = async (notification) => {
+    if (!notification.read) {
+      try {
+        await supabase
+          .from('notifications')
+          .update({ read: true, read_at: new Date().toISOString() })
+          .eq('id', notification.id);
+
+        setNotifications(prev =>
+          prev.map(n => n.id === notification.id ? { ...n, read: true } : n)
+        );
+        setUnreadCount(prev => Math.max(0, prev - 1));
+      } catch (error) {
+        console.error('Error marking notification as read:', error);
+      }
+    }
+  };
+
+  const canCancelDuty = (dutyDate) => {
+    const today = new Date();
+    const duty = new Date(dutyDate);
+    // Students cannot cancel on the actual day of their duty
+    return duty.toDateString() !== today.toDateString();
+  };
+
+  const checkSameDayCancellation = (scheduleDate) => {
+    const today = new Date().toDateString();
+    const cancelKey = `${user.id}-${scheduleDate}-${today}`;
+    return dailyCancellations.has(cancelKey);
+  };
+
+  // FIXED: Enhanced handleBookDuty with better notifications for admins
+  const handleBookDuty = async (scheduleId, date) => {
+    setBookingToConfirm({ scheduleId, date });
+  };
+
+  const confirmBookDuty = async () => {
+    const { scheduleId, date } = bookingToConfirm;
+    setBookingToConfirm(null);
+
+    try {
+      const schedule = schedules.find(s => s.id === scheduleId);
+      if (!schedule) {
+        alert('Schedule not found.');
+        return;
+      }
+
+      const activeBookings = schedule.schedule_students?.filter(ss => ss.status !== 'cancelled') || [];
+      const currentBookings = activeBookings.length;
+      const maxStudents = schedule.max_students || 2;
+
+      if (currentBookings >= maxStudents) {
+        alert(`This duty is already full (${currentBookings}/${maxStudents} students assigned).`);
+        return;
+      }
+
+      const existingBooking = activeBookings.find(ss => ss.student_id === user.id);
+      if (existingBooking) {
+        warning('You have already booked this duty.');
+        return;
+      }
+
+      console.log('Checking for existing bookings on this date...');
+      const { data: existingDateBooking, error: dateBookingError } = await supabase
+        .from('schedule_students')
+        .select(`
+          id,
+          schedules!inner(date)
+        `)
+        .eq('student_id', user.id)
+        .eq('status', 'booked')
+        .eq('schedules.date', date)
+        .maybeSingle();
+
+      if (dateBookingError && dateBookingError.code !== 'PGRST116') {
+        console.error('Error checking existing date booking:', dateBookingError);
+        error('Error checking existing bookings for this date. Please try again.');
+        return;
+      }
+
+      if (existingDateBooking) {
+        warning('You already have a duty scheduled for this date at another hospital. Students can only have one duty per day.');
+        return;
+      }
+
+      console.log('Checking for existing bookings in database...');
+      const { data: existingDbBooking, error: checkError } = await supabase
+        .from('schedule_students')
+        .select('id, status')
+        .eq('schedule_id', scheduleId)
+        .eq('student_id', user.id)
+        .neq('status', 'cancelled')
+        .maybeSingle();
+
+      if (checkError && checkError.code !== 'PGRST116') {
+        console.error('Error checking existing booking:', checkError);
+        error('Error checking existing booking. Please try again.');
+        return;
+      }
+
+      if (existingDbBooking) {
+        warning('You have already booked this duty (verified from database).');
+        await fetchSchedules();
+        return;
+      }
+
+      if (checkSameDayCancellation(date)) {
+        warning('You cannot book again today because you already cancelled a booking for this date today. Please try again tomorrow.');
+        return;
+      }
+
+      console.log('Proceeding with booking...');
+
+      const { data: newBooking, error: bookingError } = await supabase
+        .from('schedule_students')
+        .insert([{
+          schedule_id: scheduleId,
+          student_id: user.id,
+          booking_time: new Date().toISOString(),
+          status: 'booked'
+        }])
+        .select()
+        .single();
+
+      if (bookingError) {
+        if (bookingError.code === '23505') {
+          warning('You have already booked this duty. The page will refresh to show current status.');
+          await fetchSchedules();
+          return;
+        }
+        throw bookingError;
+      }
+
+      // Log the booking action
+      await supabase.from('duty_logs').insert({
+        schedule_student_id: newBooking.id,
+        schedule_id: scheduleId,
+        action: 'booked',
+        performed_by: user.id,
+        target_user: user.id,
+        notes: `Student booked duty for ${date}`
+      });
+
+      // FIXED: Send notifications to ALL admins
+      console.log('Sending notifications to admins...');
+      try {
+        const { data: admins, error: adminError } = await supabase
+          .from('profiles')
+          .select('id, full_name')
+          .eq('role', 'admin');
+
+        if (adminError) {
+          console.error('Error fetching admins:', adminError);
+        } else if (admins && admins.length > 0) {
+          console.log(`Found ${admins.length} admin(s), creating notifications...`);
+
+          const dateStr = new Date(date + 'T00:00:00').toLocaleDateString('en-US', {
+            year: 'numeric',
+            month: 'long',
+            day: 'numeric'
+          });
+
+          const notifications = admins.map(admin => ({
+            user_id: admin.id,
+            title: 'New Duty Booking',
+            message: `${user.full_name} has booked duty for ${dateStr} at ${schedule.location}`,
+            type: 'info',
+            read: false
+          }));
+
+          const { error: notifError } = await supabase
+            .from('notifications')
+            .insert(notifications);
+
+          if (notifError) {
+            console.error('Error creating admin notifications:', notifError);
+          } else {
+            console.log(`Successfully created ${notifications.length} admin notification(s)`);
+          }
+        } else {
+          console.log('No admins found in database');
+        }
+      } catch (notifErr) {
+        console.error('Error in notification process:', notifErr);
+      }
+
+      // Refresh all related data
+      await Promise.all([
+        fetchSchedules(),
+        fetchStudentDuties(),
+        fetchPendingBookings()
+      ]);
+
+      success('Duty booked successfully! Waiting for admin approval.');
+    } catch (error) {
+      console.error('Error booking duty:', error);
+      error('Error booking duty: ' + error.message);
+    }
+  };
+
+  // Approve entire schedule - currently unused but kept for future use
+  // eslint-disable-next-line no-unused-vars
+  const handleApproveSchedule = async (scheduleId) => {
+    try {
+      console.log('Approving schedule:', scheduleId);
+
+      console.log('Updating schedule status to approved...');
+      const { data, error: scheduleError } = await supabase
+        .from('schedules')
+        .update({
+          status: 'approved',
+          approved_by: user.id,
+          approved_at: new Date().toISOString()
+        })
+        .eq('id', scheduleId)
+        .select('date')
+        .single();
+
+      if (scheduleError) {
+        console.error('Error updating schedule:', scheduleError);
+        throw scheduleError;
+      }
+
+      console.log('Schedule status updated successfully');
+
+      const { data: bookings, error: bookingsError } = await supabase
+        .from('schedule_students')
+        .select('student_id, profiles:student_id(full_name)')
+        .eq('schedule_id', scheduleId)
+        .eq('status', 'booked');
+
+      if (bookingsError) {
+        console.error('Error fetching bookings for notifications:', bookingsError);
+        throw bookingsError;
+      }
+
+      console.log('Found bookings:', bookings);
+
+      if (bookings && bookings.length > 0) {
+        const dateStr = new Date(data.date + 'T00:00:00').toLocaleDateString('en-US', {
+          year: 'numeric',
+          month: 'long',
+          day: 'numeric'
+        });
+
+        const notifications = bookings.map(booking => ({
+          user_id: booking.student_id,
+          title: 'Duty Schedule Approved ✓',
+          message: `Your duty booking for ${dateStr} has been approved! You can now complete your duty on its scheduled date.`,
+          type: 'success'
+        }));
+
+        try {
+          const { error: notifError } = await supabase
+            .from('notifications')
+            .insert(notifications);
+
+          if (notifError) {
+            console.warn('Failed to send notifications:', notifError);
+          } else {
+            console.log(`Sent notifications to ${notifications.length} student(s)`);
+          }
+        } catch (err) {
+          console.warn('Notification error (non-critical):', err);
+        }
+
+        try {
+          await supabase.from('duty_logs').insert({
+            schedule_id: scheduleId,
+            action: 'approved_schedule',
+            performed_by: user.id,
+            notes: `Admin approved schedule for ${bookings.length} student(s)`
+          });
+          console.log('Approval logged');
+        } catch (logError) {
+          console.warn('Logging error (non-critical):', logError);
+        }
+      }
+
+      console.log('Refreshing all data...');
+      await Promise.all([
+        fetchSchedules(),
+        fetchPendingBookings(),
+        fetchDashboardStats()
+      ]);
+
+      console.log('Data refreshed successfully');
+
+      success(`Schedule approved successfully for all ${bookings?.length || 0} student(s)!`);
+
+    } catch (error) {
+      console.error('Error approving schedule:', error);
+      error('Error approving schedule: ' + error.message);
+    }
+  };
+
+  // FIXED: Approve individual student booking
+  const handleApproveStudent = (scheduleId, scheduleStudentId, studentName) => {
+    setApproveToConfirm({ scheduleId, scheduleStudentId, studentName });
+  };
+
+  const confirmApproveStudent = async () => {
+    const { scheduleId, scheduleStudentId, studentName } = approveToConfirm;
+    setApproveToConfirm(null);
+
+    try {
+      console.log('🔵 Starting individual student approval...');
+      console.log('Schedule ID:', scheduleId);
+      console.log('Student Booking ID:', scheduleStudentId);
+
+      const { data: booking, error: fetchError } = await supabase
+        .from('schedule_students')
+        .select('student_id, schedules(date)')
+        .eq('id', scheduleStudentId)
+        .single();
+
+      if (fetchError) {
+        console.error('❌ Error fetching booking:', fetchError);
+        throw fetchError;
+      }
+
+      console.log('✅ Student booking found:', booking);
+
+      const { data: currentSchedule, error: checkError } = await supabase
+        .from('schedules')
+        .select('status')
+        .eq('id', scheduleId)
+        .single();
+
+      if (checkError) {
+        console.error('❌ Error checking current schedule status:', checkError);
+        throw checkError;
+      }
+
+      console.log('Current schedule status:', currentSchedule?.status);
+
+      if (currentSchedule?.status !== 'pending') {
+        alert(`This schedule is no longer pending (status: ${currentSchedule?.status}). Cannot approve.`);
+        return;
+      }
+
+      console.log('🔵 Approving only this specific student booking...');
+
+      const { error: bookingError } = await supabase
+        .from('schedule_students')
+        .update({
+          status: 'approved',
+          approved_at: new Date().toISOString(),
+          approved_by: user.id
+        })
+        .eq('id', scheduleStudentId);
+
+      if (bookingError) {
+        console.error('❌ Error updating student booking:', bookingError);
+        throw bookingError;
+      }
+
+      console.log('✅ Student booking approved successfully');
+
+      console.log('🔵 Sending notification to student...');
+      try {
+        const dateStr = new Date(booking.schedules.date + 'T00:00:00').toLocaleDateString('en-US', {
+          year: 'numeric',
+          month: 'long',
+          day: 'numeric'
+        });
+
+        const { error: notifError } = await supabase
+          .from('notifications')
+          .insert({
+            user_id: booking.student_id,
+            title: 'Duty Booking Approved ✓',
+            message: `Your duty booking for ${dateStr} has been approved! You can now complete your duty on its scheduled date.`,
+            type: 'success'
+          });
+
+        if (notifError) {
+          console.warn('⚠️ Failed to send notification:', notifError);
+        } else {
+          console.log('✅ Notification sent to student');
+        }
+      } catch (err) {
+        console.warn('⚠️ Notification error (non-critical):', err);
+      }
+
+      console.log('🔵 Logging approval action...');
+      try {
+        await supabase.from('duty_logs').insert({
+          schedule_student_id: scheduleStudentId,
+          schedule_id: scheduleId,
+          action: 'approved_individual',
+          performed_by: user.id,
+          target_user: booking.student_id,
+          notes: `Admin approved individual student booking for ${studentName}`
+        });
+        console.log('✅ Approval logged');
+      } catch (logError) {
+        console.warn('⚠️ Logging error (non-critical):', logError);
+      }
+
+      console.log('🔵 Checking if all students are approved...');
+      const { data: allBookings, error: allBookingsError } = await supabase
+        .from('schedule_students')
+        .select('id, status')
+        .eq('schedule_id', scheduleId)
+        .eq('status', 'booked');
+
+      if (allBookingsError) {
+        console.warn('⚠️ Error checking remaining bookings:', allBookingsError);
+      } else if (!allBookings || allBookings.length === 0) {
+        console.log('🔵 All students approved, updating schedule status...');
+        const { error: scheduleError } = await supabase
+          .from('schedules')
+          .update({
+            status: 'approved',
+            approved_by: user.id,
+            approved_at: new Date().toISOString()
+          })
+          .eq('id', scheduleId);
+
+        if (scheduleError) {
+          console.warn('⚠️ Error updating schedule status:', scheduleError);
+        } else {
+          console.log('✅ Schedule status updated to approved');
+        }
+      }
+
+      console.log('🔵 Refreshing all data from database...');
+      await Promise.all([
+        fetchSchedules(),
+        fetchPendingBookings(),
+        fetchDashboardStats(),
+        fetchSystemLogs() // Refresh system logs after approval
+      ]);
+
+      console.log('✅ Data refreshed successfully');
+
+      success(`✅ Duty approved for ${studentName}!\n\n📝 Individual booking approved.`);
+
+    } catch (error) {
+      console.error('❌ FULL ERROR:', error);
+      error('❌ Error approving student: ' + error.message);
+    }
+  };
+
+  // FIXED: Approve all students for a schedule
+  const handleApproveAllStudents = (scheduleId) => {
+    const schedule = pendingBookings.find(s => s.id === scheduleId);
+    if (!schedule) {
+      alert('Schedule not found');
+      return;
+    }
+    const studentCount = schedule.schedule_students?.length || 0;
+    setApproveAllToConfirm({ scheduleId, studentCount, date: schedule.date });
+  };
+
+  const confirmApproveAllStudents = async () => {
+    const { scheduleId, date: scheduleDate } = approveAllToConfirm;
+    setApproveAllToConfirm(null);
+
+    try {
+      console.log('Approving all students for schedule:', scheduleId);
+
+      console.log('Updating schedule status to approved...');
+      const { error: scheduleError } = await supabase
+        .from('schedules')
+        .update({
+          status: 'approved',
+          approved_by: user.id,
+          approved_at: new Date().toISOString()
+        })
+        .eq('id', scheduleId);
+
+      if (scheduleError) {
+        console.error('Error updating schedule:', scheduleError);
+        throw scheduleError;
+      }
+
+      console.log('Schedule status updated successfully');
+
+      const { data: bookings, error: bookingsError } = await supabase
+        .from('schedule_students')
+        .select('student_id, profiles:student_id(full_name)')
+        .eq('schedule_id', scheduleId)
+        .eq('status', 'booked');
+
+      if (bookingsError) {
+        console.error('Error fetching bookings for notifications:', bookingsError);
+        throw bookingsError;
+      }
+
+      console.log('Found bookings:', bookings);
+
+      if (bookings && bookings.length > 0) {
+        const dateStr = new Date(scheduleDate + 'T00:00:00').toLocaleDateString('en-US', {
+          year: 'numeric',
+          month: 'long',
+          day: 'numeric'
+        });
+
+        const notifications = bookings.map(booking => ({
+          user_id: booking.student_id,
+          title: 'Duty Schedule Approved ✓',
+          message: `Your duty booking for ${dateStr} has been approved! You can now complete your duty on its scheduled date.`,
+          type: 'success'
+        }));
+
+        try {
+          const { error: notifError } = await supabase
+            .from('notifications')
+            .insert(notifications);
+
+          if (notifError) {
+            console.warn('Failed to send notifications:', notifError);
+          } else {
+            console.log(`Sent notifications to ${notifications.length} student(s)`);
+          }
+        } catch (err) {
+          console.warn('Notification error (non-critical):', err);
+        }
+
+        try {
+          await supabase.from('duty_logs').insert({
+            schedule_id: scheduleId,
+            action: 'approved_all',
+            performed_by: user.id,
+            notes: `Admin approved schedule for ${bookings.length} student(s)`
+          });
+          console.log('Approval logged');
+        } catch (logError) {
+          console.warn('Logging error (non-critical):', logError);
+        }
+      }
+
+      console.log('Refreshing all data...');
+      await Promise.all([
+        fetchSchedules(),
+        fetchPendingBookings(),
+        fetchDashboardStats(),
+        fetchSystemLogs() // Refresh system logs after approval
+      ]);
+
+      console.log('Data refreshed successfully');
+
+      success(`Schedule approved successfully for all ${bookings?.length || 0} student(s)!`);
+
+    } catch (error) {
+      console.error('Error approving schedule:', error);
+      alert('Error approving schedule: ' + error.message);
+    }
+  };
+
+  // FIXED: Reject individual student booking
+  const handleRejectStudent = async (scheduleId, scheduleStudentId, studentName) => {
+    setStudentToReject({ scheduleId, scheduleStudentId, studentName });
+    setShowRejectConfirm(true);
+  };
+
+  const confirmRejectStudent = async () => {
+    if (!studentToReject) return;
+
+    try {
+      console.log('Rejecting individual student booking:', studentToReject.scheduleStudentId);
+
+      const { data: booking, error: fetchError } = await supabase
+        .from('schedule_students')
+        .select('student_id')
+        .eq('id', studentToReject.scheduleStudentId)
+        .single();
+
+      if (fetchError) throw fetchError;
+
+      const { error: cancelError } = await supabase
+        .from('schedule_students')
+        .update({
+          status: 'cancelled',
+          cancelled_at: new Date().toISOString(),
+          cancellation_reason: 'Rejected by admin'
+        })
+        .eq('id', studentToReject.scheduleStudentId);
+
+      if (cancelError) throw cancelError;
+
+      try {
+        await supabase.from('notifications').insert({
+          user_id: booking.student_id,
+          title: 'Duty Booking Rejected',
+          message: `Your duty booking has been rejected by the administrator. Please contact admin for more details.`,
+          type: 'error'
+        });
+      } catch (err) {
+        console.warn('Failed to send notification:', err);
+      }
+
+      await supabase.from('duty_logs').insert({
+        schedule_student_id: studentToReject.scheduleStudentId,
+        schedule_id: studentToReject.scheduleId,
+        action: 'rejected',
+        performed_by: user.id,
+        target_user: booking.student_id,
+        notes: `Admin rejected individual student booking for ${studentToReject.studentName}`
+      });
+
+      const { data: remainingBookings, error: checkError } = await supabase
+        .from('schedule_students')
+        .select('id')
+        .eq('schedule_id', studentToReject.scheduleId)
+        .eq('status', 'booked');
+
+      if (checkError) throw checkError;
+
+      if (!remainingBookings || remainingBookings.length === 0) {
+        await supabase
+          .from('schedules')
+          .update({ status: 'pending' })
+          .eq('id', studentToReject.scheduleId);
+      }
+
+      await Promise.all([
+        fetchSchedules(),
+        fetchPendingBookings(),
+        fetchDashboardStats(),
+        fetchSystemLogs() // Refresh system logs after rejection
+      ]);
+
+      setShowRejectConfirm(false);
+      setStudentToReject(null);
+      alert(`Booking rejected for ${studentToReject.studentName}.`);
+    } catch (error) {
+      console.error('Error rejecting student:', error);
+      error('Error rejecting student: ' + error.message);
+    }
+  };
+
+  // Reject all students for a schedule
+  const handleRejectAllStudents = async (scheduleId) => {
+    setScheduleToReject(scheduleId);
+    setStudentToReject(null);
+    setShowRejectConfirm(true);
+  };
+
+  const confirmRejectAllStudents = async () => {
+    if (!scheduleToReject) return;
+
+    try {
+      console.log('Rejecting all students for schedule:', scheduleToReject);
+
+      const { data: bookings } = await supabase
+        .from('schedule_students')
+        .select('student_id, profiles:student_id(full_name)')
+        .eq('schedule_id', scheduleToReject)
+        .eq('status', 'booked');
+
+      const { error: cancelError } = await supabase
+        .from('schedule_students')
+        .update({
+          status: 'cancelled',
+          cancelled_at: new Date().toISOString(),
+          cancellation_reason: 'Schedule rejected by admin'
+        })
+        .eq('schedule_id', scheduleToReject)
+        .eq('status', 'booked');
+
+      if (cancelError) throw cancelError;
+
+      const { error: scheduleError } = await supabase
+        .from('schedules')
+        .update({ status: 'cancelled' })
+        .eq('id', scheduleToReject);
+
+      if (scheduleError) throw scheduleError;
+
+      if (bookings && bookings.length > 0) {
+        const notifications = bookings.map(booking => ({
+          user_id: booking.student_id,
+          title: 'Duty Schedule Rejected',
+          message: `The duty schedule has been rejected by the administrator. Your booking has been cancelled.`,
+          type: 'error'
+        }));
+
+        try {
+          await supabase.from('notifications').insert(notifications);
+        } catch (err) {
+          console.warn('Failed to send notifications:', err);
+        }
+      }
+
+      await supabase.from('duty_logs').insert({
+        schedule_id: scheduleToReject,
+        action: 'rejected_all',
+        performed_by: user.id,
+        notes: `Admin rejected schedule and cancelled ${bookings?.length || 0} student booking(s)`
+      });
+
+      await Promise.all([
+        fetchSchedules(),
+        fetchPendingBookings(),
+        fetchDashboardStats(),
+        fetchSystemLogs() // Refresh system logs after rejection
+      ]);
+
+      setShowRejectConfirm(false);
+      setScheduleToReject(null);
+      alert(`Schedule rejected and all ${bookings?.length || 0} booking(s) cancelled.`);
+    } catch (error) {
+      console.error('Error rejecting schedule:', error);
+      error('Error rejecting schedule: ' + error.message);
+    }
+  };
+
+  // Reject schedule functions - currently unused but kept for future use
+  // eslint-disable-next-line no-unused-vars
+  const handleRejectSchedule = async (scheduleId) => {
+    setScheduleToReject(scheduleId);
+    setShowRejectConfirm(true);
+  };
+
+  // eslint-disable-next-line no-unused-vars
+  const confirmRejectSchedule = async () => {
+    if (!scheduleToReject) return;
+
+    try {
+      console.log('Rejecting schedule:', scheduleToReject);
+
+      const { error: cancelError } = await supabase
+        .from('schedule_students')
+        .update({
+          status: 'cancelled',
+          cancelled_at: new Date().toISOString(),
+          cancellation_reason: 'Schedule rejected by admin'
+        })
+        .eq('schedule_id', scheduleToReject);
+
+      if (cancelError) throw cancelError;
+
+      await dbHelpers.updateScheduleStatus(scheduleToReject, 'cancelled', user.id);
+
+      await Promise.all([
+        fetchSchedules(),
+        fetchPendingBookings(),
+        fetchDashboardStats(),
+        fetchSystemLogs()
+      ]);
+
+      setShowRejectConfirm(false);
+      setScheduleToReject(null);
+      alert('Schedule rejected and all bookings cancelled.');
+    } catch (error) {
+      console.error('Error rejecting schedule:', error);
+      alert('Error rejecting schedule: ' + error.message);
+    }
+  };
+
+  const handleCancelDuty = async (scheduleStudentId, date) => {
+    if (!canCancelDuty(date)) {
+      alert('Cannot cancel duty on the actual day of your scheduled duty.');
+      return;
+    }
+
+    try {
+      await dbHelpers.cancelDuty(scheduleStudentId, user.id, user.role);
+
+      const today = new Date().toDateString();
+      const cancelKey = `${user.id}-${date}-${today}`;
+      setDailyCancellations(prev => new Set(prev).add(cancelKey));
+
+      await Promise.all([
+        fetchSchedules(),
+        fetchStudentDuties(),
+        fetchPendingBookings()
+      ]);
+      alert('Duty cancelled successfully. Note: You cannot book another duty for this date today.');
+    } catch (error) {
+      error('Error cancelling duty: ' + error.message);
+    }
+  };
+
+  const handleDeleteDuty = async (scheduleStudentId) => {
+    if (!window.confirm('Are you sure you want to delete this duty entry? This action cannot be undone.')) {
+      return;
+    }
+
+    try {
+      const { error } = await supabase
+        .from('schedule_students')
+        .delete()
+        .eq('id', scheduleStudentId)
+        .eq('student_id', user.id);
+
+      if (error) throw error;
+
+      await Promise.all([
+        fetchSchedules(),
+        fetchStudentDuties(),
+        fetchPendingBookings()
+      ]);
+      success('Duty entry deleted successfully.');
+    } catch (error) {
+      console.error('Error deleting duty:', error);
+      alert('Error deleting duty: ' + error.message);
+    }
+  };
+
+  const handleCompleteDuty = async (scheduleStudentId) => {
+    if (!window.confirm('Mark this duty as completed? This will generate a completion certificate.')) {
+      return;
+    }
+
+    try {
+      const { error } = await supabase
+        .from('schedule_students')
+        .update({
+          status: 'completed',
+          completed_at: new Date().toISOString()
+        })
+        .eq('id', scheduleStudentId)
+        .eq('student_id', user.id);
+
+      if (error) throw error;
+
+      await Promise.all([
+        fetchSchedules(),
+        fetchStudentDuties(),
+        fetchPendingBookings()
+      ]);
+      success('Duty marked as completed! You can now print your completion certificate.');
+    } catch (error) {
+      console.error('Error completing duty:', error);
+      alert('Error completing duty: ' + error.message);
+    }
+  };
+
+
+  const handlePrintCertificate = (duty) => {
+    const printWindow = window.open('', '_blank');
+    const certificateContent = `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <title>Duty Completion Certificate</title>
+        <style>
+          body { font-family: Arial, sans-serif; margin: 0; padding: 20px; }
+          .certificate { border: 3px solid #10b981; padding: 30px; text-align: center; max-width: 800px; margin: 0 auto; }
+          .header { color: #10b981; font-size: 28px; font-weight: bold; margin-bottom: 20px; }
+          .subtitle { color: #6b7280; font-size: 18px; margin-bottom: 30px; }
+          .content { margin: 30px 0; }
+          .student-info { background: #f0fdf4; padding: 20px; border-radius: 8px; margin: 20px 0; }
+          .duty-info { background: #f9fafb; padding: 20px; border-radius: 8px; margin: 20px 0; }
+          .signature { margin-top: 50px; display: flex; justify-content: space-between; }
+          .signature-box { width: 200px; border-top: 1px solid #000; text-align: center; padding-top: 10px; }
+          .date { margin-top: 30px; text-align: right; }
+          @media print { body { margin: 0; } .certificate { border: 3px solid #10b981; } }
+        </style>
+      </head>
+      <body>
+        <div class="certificate">
+          <div class="header">DUTY COMPLETION CERTIFICATE</div>
+          <div class="subtitle">Ilocos Sur Community College - Midwifery Program</div>
+          
+          <div class="content">
+            <p>This is to certify that</p>
+            <div class="student-info">
+              <h2 style="color: #10b981; margin: 0;">${user.full_name}</h2>
+              <p style="margin: 5px 0;">Student Number: ${user.student_number || 'N/A'}</p>
+              <p style="margin: 5px 0;">Year Level: ${user.year_level || 'N/A'}</p>
+            </div>
+            
+            <p>has successfully completed their duty assignment on</p>
+            <div class="duty-info">
+              <h3 style="color: #10b981; margin: 0;">${new Date(duty.schedules.date).toLocaleDateString('en-US', {
+      weekday: 'long',
+      year: 'numeric',
+      month: 'long',
+      day: 'numeric'
+    })}</h3>
+              <p style="margin: 5px 0;">Location: ${duty.schedules.location}</p>
+              <p style="margin: 5px 0;">Time: ${duty.schedules.shift_start} - ${duty.schedules.shift_end}</p>
+              <p style="margin: 5px 0;">Description: ${duty.schedules.description}</p>
+            </div>
+            
+            <p>This certificate is issued in recognition of their commitment and dedication to community health service.</p>
+          </div>
+          
+          <div class="signature">
+            <div class="signature-box">
+              <p>Student Signature</p>
+            </div>
+            <div class="signature-box">
+              <p>Supervisor Signature</p>
+            </div>
+          </div>
+          
+          <div class="date">
+            <p>Date Issued: ${new Date().toLocaleDateString()}</p>
+          </div>
+        </div>
+      </body>
+      </html>
+    `;
+
+    printWindow.document.write(certificateContent);
+    printWindow.document.close();
+    printWindow.focus();
+    printWindow.print();
+  };
+
+  // Calendar generation function with proper date handling and user-specific filtering
+  const generateCalendar = () => {
+    const year = currentDate.getFullYear();
+    const month = currentDate.getMonth();
+    const firstDay = new Date(year, month, 1);
+    const startDate = new Date(firstDay);
+    startDate.setDate(startDate.getDate() - firstDay.getDay());
+
+    const calendar = [];
+    const currentDateLoop = new Date(startDate);
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    for (let week = 0; week < 6; week++) {
+      const weekDays = [];
+      for (let day = 0; day < 7; day++) {
+        let daySchedule = schedules.find(s => {
+          const matchesDate = new Date(s.date).toDateString() === currentDateLoop.toDateString();
+          const matchesHospital = user?.role === 'student' && selectedHospital !== 'all'
+            ? s.location === selectedHospital
+            : true;
+          return matchesDate && matchesHospital;
+        });
+
+        const dayDate = new Date(currentDateLoop);
+        dayDate.setHours(0, 0, 0, 0);
+
+        weekDays.push({
+          date: new Date(currentDateLoop),
+          schedule: daySchedule,
+          isCurrentMonth: currentDateLoop.getMonth() === month,
+          isToday: currentDateLoop.toDateString() === today.toDateString(),
+          isPast: dayDate < today
+        });
+
+        currentDateLoop.setDate(currentDateLoop.getDate() + 1);
+      }
+      calendar.push(weekDays);
+    }
+
+    return calendar;
+  };
+
+  // Define menu items based on user role
+  const menuItems = [
+    { id: 'dashboard', label: 'Dashboard', icon: Home },
+    { id: 'schedule', label: 'Schedule Calendar', icon: Calendar },
+    ...(user?.role === 'student' ? [
+      { id: 'duties', label: 'My Duties', icon: Clock }
+    ] : []),
+    ...(isAdmin ? [
+      { id: 'schedule-management', label: 'Manage Schedules', icon: CalendarIcon },
+      { id: 'student-management', label: 'Students', icon: Users },
+      { id: 'user-management', label: 'User Management', icon: Shield },
+      { id: 'reports', label: 'Reports & Analytics', icon: BarChart3 },
+      { id: 'logs', label: 'System Logs', icon: Activity }
+    ] : []),
+    ...(user?.role === 'parent' ? [
+      { id: 'child-duties', label: "Child's Duties", icon: Eye }
+    ] : []),
+    { id: 'notifications', label: 'Notifications', icon: Bell },
+    { id: 'profile', label: 'Profile Settings', icon: Settings },
+  ];
+
+  // Dashboard Overview Component
+  const quickActions = [
+    {
+      name: 'Create New Schedule',
+      icon: Plus,
+      color: 'bg-blue-500',
+      onClick: () => {
+        setActiveTab('schedule-management');
+      }
+    },
+    {
+      name: 'Manage Students',
+      icon: Users,
+      color: 'bg-green-500',
+      onClick: () => {
+        setActiveTab('student-management');
+      }
+    },
+    {
+      name: 'View Reports',
+      icon: BarChart3,
+      color: 'bg-purple-500',
+      onClick: () => {
+        setActiveTab('reports');
+      }
+    }
+  ];
+
+  const locationChartData = {
+    labels: Object.keys(chartData.locationDistribution),
+    datasets: [{
+      label: 'Schedules by Location',
+      data: Object.values(chartData.locationDistribution),
+      backgroundColor: [
+        '#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899'
+      ]
+    }]
+  };
+
+  const bookingTrendsData = {
+    labels: Object.keys(chartData.bookingTrends).map(date =>
+      new Date(date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+    ),
+    datasets: [{
+      label: 'Bookings',
+      data: Object.values(chartData.bookingTrends),
+      borderColor: '#3b82f6',
+      backgroundColor: 'rgba(59, 130, 246, 0.1)',
+      tension: 0.4
+    }]
+  };
+
+  const approvalStatusData = {
+    labels: ['Pending', 'Approved', 'Cancelled', 'Completed'],
+    datasets: [{
+      data: [
+        chartData.approvalStatus.pending || 0,
+        chartData.approvalStatus.approved || 0,
+        chartData.approvalStatus.cancelled || 0,
+        chartData.approvalStatus.completed || 0
+      ],
+      backgroundColor: ['#f59e0b', '#10b981', '#ef4444', '#3b82f6']
+    }]
+  };
+
+  const renderDashboardView = () => (
+    <div className="space-y-6">
+      <div className="flex justify-between items-center">
+        <div>
+          <h2 className="text-3xl font-bold text-gray-900">
+            Welcome back, {user?.full_name}
+          </h2>
+          <p className="text-gray-600 mt-1">
+            {new Date().toLocaleDateString('en-US', {
+              weekday: 'long',
+              year: 'numeric',
+              month: 'long',
+              day: 'numeric'
+            })}
+          </p>
+        </div>
+
+      </div>
+
+      {/* Quick Actions */}
+      {isAdmin && (
+        <div className="bg-white rounded-lg shadow mb-8">
+          <div className="p-6">
+            <h2 className="text-lg font-semibold text-gray-900 mb-4">Quick Actions</h2>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+              {quickActions.map((action, index) => (
+                <button
+                  key={index}
+                  onClick={action.onClick}
+                  className={`flex items-center space-x-4 p-6 rounded-xl hover:shadow-lg transition-all ${action.color} text-white h-20`}
+                >
+                  <action.icon className="h-8 w-8 flex-shrink-0" />
+                  <span className="font-semibold text-lg">{action.name}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Stats Cards */}
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+        {isAdmin ? (
+          <>
+            <button onClick={() => setActiveTab('student-management')} className="card bg-gradient-to-r from-slate-700 to-slate-800 text-white h-24 w-full text-left hover:brightness-110 hover:shadow-lg transition-all cursor-pointer">
+              <div className="flex items-center justify-between h-full px-4">
+                <div className="flex-1">
+                  <p className="text-slate-200 text-xs font-medium uppercase tracking-wide">Total Students</p>
+                  <p className="text-2xl font-bold mt-1">{dashboardStats.totalStudents}</p>
+                </div>
+                <div className="flex-shrink-0 ml-3">
+                  <Users className="w-8 h-8 text-slate-200 opacity-80" />
+                </div>
+              </div>
+            </button>
+            <button onClick={() => setActiveTab('pending')} className="card bg-gradient-to-r from-emerald-600 to-emerald-700 text-white h-24 w-full text-left hover:brightness-110 hover:shadow-lg transition-all cursor-pointer">
+              <div className="flex items-center justify-between h-full px-4">
+                <div className="flex-1">
+                  <p className="text-emerald-200 text-xs font-medium uppercase tracking-wide">Pending Approvals</p>
+                  <p className="text-2xl font-bold mt-1">{pendingBookings.length}</p>
+                </div>
+                <div className="flex-shrink-0 ml-3">
+                  <Clock className="w-8 h-8 text-emerald-200 opacity-80" />
+                </div>
+              </div>
+            </button>
+            <button onClick={() => setActiveTab('schedule')} className="card bg-gradient-to-r from-green-600 to-green-700 text-white h-24 w-full text-left hover:brightness-110 hover:shadow-lg transition-all cursor-pointer">
+              <div className="flex items-center justify-between h-full px-4">
+                <div className="flex-1">
+                  <p className="text-green-200 text-xs font-medium uppercase tracking-wide">Today's Duties</p>
+                  <p className="text-2xl font-bold mt-1">{dashboardStats.todayDuties}</p>
+                </div>
+                <div className="flex-shrink-0 ml-3">
+                  <CalendarIcon className="w-8 h-8 text-green-200 opacity-80" />
+                </div>
+              </div>
+            </button>
+          </>
+        ) : user?.role === 'student' ? (
+          <>
+            <button onClick={() => setActiveTab('duties')} className="card bg-gradient-to-r from-slate-600 to-slate-700 text-white h-24 w-full text-left hover:brightness-110 hover:shadow-lg transition-all cursor-pointer">
+              <div className="flex items-center justify-between h-full px-4">
+                <div className="flex-1">
+                  <p className="text-slate-200 text-xs font-medium uppercase tracking-wide">Total Duties</p>
+                  <p className="text-2xl font-bold mt-1">{dashboardStats.totalDuties}</p>
+                </div>
+                <div className="flex-shrink-0 ml-3">
+                  <Clock className="w-8 h-8 text-slate-200 opacity-80" />
+                </div>
+              </div>
+            </button>
+            <button onClick={() => setActiveTab('schedule')} className="card bg-gradient-to-r from-emerald-500 to-emerald-600 text-white h-24 w-full text-left hover:brightness-110 hover:shadow-lg transition-all cursor-pointer">
+              <div className="flex items-center justify-between h-full px-4">
+                <div className="flex-1">
+                  <p className="text-emerald-200 text-xs font-medium uppercase tracking-wide">Upcoming</p>
+                  <p className="text-2xl font-bold mt-1">{dashboardStats.upcomingDuties}</p>
+                </div>
+                <div className="flex-shrink-0 ml-3">
+                  <Calendar className="w-8 h-8 text-emerald-200 opacity-80" />
+                </div>
+              </div>
+            </button>
+            <button onClick={() => setActiveTab('duties')} className="card bg-gradient-to-r from-green-600 to-green-700 text-white h-24 w-full text-left hover:brightness-110 hover:shadow-lg transition-all cursor-pointer">
+              <div className="flex items-center justify-between h-full px-4">
+                <div className="flex-1">
+                  <p className="text-green-200 text-xs font-medium uppercase tracking-wide">Completion Rate</p>
+                  <p className="text-2xl font-bold mt-1">{dashboardStats.completionRate}%</p>
+                </div>
+                <div className="flex-shrink-0 ml-3">
+                  <Star className="w-8 h-8 text-green-200 opacity-80" />
+                </div>
+              </div>
+            </button>
+          </>
+        ) : (
+          // Parent view
+          <button onClick={() => setActiveTab('child-duties')} className="card bg-gradient-to-r from-slate-500 to-slate-600 text-white h-24 w-full text-left hover:brightness-110 hover:shadow-lg transition-all cursor-pointer">
+            <div className="flex items-center justify-between h-full px-4">
+              <div className="flex-1">
+                <p className="text-slate-200 text-xs font-medium uppercase tracking-wide">Child's Duties</p>
+                <p className="text-2xl font-bold mt-1">View Access</p>
+              </div>
+              <div className="flex-shrink-0 ml-3">
+                <Eye className="w-8 h-8 text-slate-200 opacity-80" />
+              </div>
+            </div>
+          </button>
+        )}
+      </div>
+
+      {/* Charts */}
+      {isAdmin && (
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 mb-8">
+          {/* Location Distribution */}
+          <div className="bg-white p-6 rounded-lg shadow">
+            <h3 className="text-lg font-semibold text-gray-900 mb-4">Location Distribution</h3>
+            <Pie data={locationChartData} options={{
+              responsive: true,
+              plugins: {
+                legend: {
+                  position: 'bottom'
+                }
+              }
+            }} />
+          </div>
+
+          {/* Booking Trends */}
+          <div className="bg-white p-6 rounded-lg shadow">
+            <h3 className="text-lg font-semibold text-gray-900 mb-4">Booking Trends (Last 7 Days)</h3>
+            <Line data={bookingTrendsData} options={{
+              responsive: true,
+              plugins: {
+                legend: {
+                  display: false
+                }
+              },
+              scales: {
+                y: {
+                  beginAtZero: true
+                }
+              }
+            }} />
+          </div>
+        </div>
+      )}
+
+      {/* Approval Status Chart */}
+      {isAdmin && (
+        <div className="bg-white p-6 rounded-lg shadow mb-8">
+          <h3 className="text-lg font-semibold text-gray-900 mb-4">Approval Status</h3>
+          <Bar data={approvalStatusData} options={{
+            responsive: true,
+            plugins: {
+              legend: {
+                display: false
+              }
+            },
+            scales: {
+              y: {
+                beginAtZero: true
+              }
+            }
+          }} />
+        </div>
+      )}
+
+      {/* Quick Actions and Recent Activity */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        {/* Recent Notifications */}
+        <div className="card">
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="text-lg font-semibold text-gray-900">Recent Notifications</h3>
+            <button
+              onClick={() => setActiveTab('notifications')}
+              className="text-emerald-600 hover:text-emerald-700 text-sm font-medium"
+            >
+              View All
+            </button>
+          </div>
+          <div className="space-y-3">
+            {notifications.slice(0, 5).map((notification) => (
+              <button key={notification.id} onClick={() => setActiveTab('notifications')} className="w-full flex items-start space-x-3 p-3 rounded-lg hover:bg-gray-50 cursor-pointer text-left transition-colors">
+                <div className={`w-2 h-2 rounded-full mt-2 flex-shrink-0 ${notification.type === 'success' ? 'bg-green-500' :
+                  notification.type === 'warning' ? 'bg-yellow-500' :
+                    notification.type === 'error' ? 'bg-red-500' :
+                      'bg-blue-500'
+                  }`}></div>
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-medium text-gray-900 truncate">
+                    {notification.title}
+                  </p>
+                  <p className="text-sm text-gray-500 truncate">
+                    {notification.message}
+                  </p>
+                  <p className="text-xs text-gray-400 mt-1">
+                    {new Date(notification.created_at).toLocaleString()}
+                  </p>
+                </div>
+                {!notification.read && (
+                  <div className="w-3 h-3 bg-blue-500 rounded-full flex-shrink-0 mt-1"></div>
+                )}
+              </button>
+            ))}
+
+            {notifications.length === 0 && (
+              <p className="text-gray-500 text-center py-4">No notifications yet</p>
+            )}
+          </div>
+        </div>
+
+        {/* Upcoming Duties */}
+        <div className="card">
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="text-lg font-semibold text-gray-900">Upcoming Duties</h3>
+            <button
+              onClick={() => setActiveTab('schedule')}
+              className="text-emerald-600 hover:text-emerald-700 text-sm font-medium"
+            >
+              View Calendar
+            </button>
+          </div>
+          <div className="space-y-3">
+            {schedules
+              .filter(s => new Date(s.date) >= new Date() &&
+                (isAdmin ||
+                  s.schedule_students?.some(ss => ss.student_id === user.id)))
+              .slice(0, 5)
+              .map((schedule) => {
+                const activeStudents = schedule.schedule_students?.filter(ss => ss.status !== 'cancelled').length || 0;
+                const maxStudents = schedule.max_students || 2;
+
+                return (
+                  <button key={schedule.id} onClick={() => setActiveTab('schedule')} className="w-full flex items-center justify-between p-3 rounded-lg bg-gray-50 hover:bg-gray-100 cursor-pointer transition-colors text-left">
+                    <div>
+                      <p className="font-medium text-gray-900">
+                        {new Date(schedule.date).toLocaleDateString()}
+                      </p>
+                      <p className="text-sm text-gray-500">
+                        {activeStudents}/{maxStudents} students assigned
+                      </p>
+                    </div>
+                    <span className={`px-2 py-1 rounded-full text-xs font-medium ${schedule.status === 'approved'
+                      ? 'bg-green-100 text-green-800'
+                      : 'bg-yellow-100 text-yellow-800'
+                      }`}>
+                      {schedule.status}
+                    </span>
+                  </button>
+                );
+              })}
+            {schedules.length === 0 && (
+              <p className="text-gray-500 text-center py-4">No upcoming duties</p>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+
+  // Pending Approvals View
+  const renderPendingApprovalsView = () => (
+    <div className="space-y-6">
+      <div className="flex justify-between items-center">
+        <div>
+          <h3 className="text-2xl font-bold text-gray-900">Pending Schedule Approvals</h3>
+          <p className="text-gray-600">Review and approve duty schedules - You can approve students individually or all at once</p>
+        </div>
+        <div className="bg-yellow-100 text-yellow-800 px-3 py-1 rounded-full text-sm font-medium">
+          {pendingBookings.length} pending schedule{pendingBookings.length !== 1 ? 's' : ''}
+        </div>
+      </div>
+
+      {pendingBookings.length === 0 ? (
+        <div className="text-center py-12">
+          <CheckCircle className="w-16 h-16 mx-auto mb-4 text-green-300" />
+          <h3 className="text-lg font-medium text-gray-900 mb-2">All caught up!</h3>
+          <p className="text-gray-600">No pending schedule approvals at the moment.</p>
+        </div>
+      ) : (
+        <div className="space-y-4">
+          {pendingBookings.map((schedule) => {
+            const students = schedule.schedule_students || [];
+            return (
+              <div key={schedule.id} className="card hover:shadow-lg transition-shadow border-l-4 border-l-yellow-400">
+                <div className="flex justify-between items-start">
+                  <div className="flex-1">
+                    <div className="flex items-center space-x-3 mb-3">
+                      <Calendar className="w-5 h-5 text-emerald-600" />
+                      <div>
+                        <h4 className="font-semibold text-lg text-gray-900">
+                          {new Date(schedule.date).toLocaleDateString('en-US', {
+                            weekday: 'long',
+                            year: 'numeric',
+                            month: 'long',
+                            day: 'numeric'
+                          })}
+                        </h4>
+                        <p className="text-sm text-gray-600">
+                          {schedule.shift_start} - {schedule.shift_end} • {schedule.location}
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="bg-gray-50 p-3 rounded-lg mb-4">
+                      <p className="text-sm text-gray-600 mb-1">Schedule Details:</p>
+                      <p className="text-sm font-medium text-gray-900">{schedule.description}</p>
+                    </div>
+
+                    <div className="bg-blue-50 p-4 rounded-lg border border-blue-200">
+                      <div className="flex items-center space-x-2 mb-3">
+                        <Users className="w-4 h-4 text-blue-600" />
+                        <p className="font-medium text-blue-900">
+                          Students Assigned ({students.length}/{schedule.max_students || 2})
+                        </p>
+                      </div>
+                      <div className="space-y-2">
+                        {students.map((student, idx) => (
+                          <div key={student.id} className="flex items-center justify-between bg-white p-3 rounded border border-gray-200">
+                            <div className="flex items-center space-x-3 flex-1">
+                              <div className="w-8 h-8 bg-emerald-100 rounded-full flex items-center justify-center flex-shrink-0">
+                                <span className="text-emerald-700 text-xs font-medium">
+                                  {student.profiles?.full_name?.split(' ').map(n => n[0]).join('').substring(0, 2)}
+                                </span>
+                              </div>
+                              <div className="flex-1 min-w-0">
+                                <p className="text-sm font-medium text-gray-900 truncate">{student.profiles?.full_name}</p>
+                                <p className="text-xs text-gray-600">{student.profiles?.student_number} • {student.profiles?.year_level}</p>
+                              </div>
+                              <div className="text-xs text-gray-500 hidden sm:block">
+                                Booked: {new Date(student.booking_time).toLocaleDateString()}
+                              </div>
+                            </div>
+
+                            {/* Individual student action buttons */}
+                            <div className="flex space-x-2 ml-4">
+                              <button
+                                onClick={() => handleApproveStudent(schedule.id, student.id, student.profiles?.full_name)}
+                                className="flex items-center space-x-1 bg-green-600 hover:bg-green-700 text-white px-3 py-1 rounded transition-colors text-xs"
+                                title="Approve this student"
+                              >
+                                <Check className="w-3 h-3" />
+                                <span className="hidden sm:inline">Approve</span>
+                              </button>
+                              <button
+                                onClick={() => handleRejectStudent(schedule.id, student.id, student.profiles?.full_name)}
+                                className="flex items-center space-x-1 bg-red-600 hover:bg-red-700 text-white px-3 py-1 rounded transition-colors text-xs"
+                                title="Reject this student"
+                              >
+                                <X className="w-3 h-3" />
+                                <span className="hidden sm:inline">Reject</span>
+                              </button>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+
+                    <div className="mt-3 p-2 bg-yellow-50 rounded border border-yellow-200">
+                      <p className="text-xs text-yellow-800">
+                        💡 Tip: You can approve or reject students individually, or use the buttons on the right to approve/reject all students at once.
+                      </p>
+                    </div>
+                  </div>
+
+                  {/* Bulk action buttons */}
+                  <div className="flex flex-col space-y-2 ml-6">
+                    <button
+                      onClick={() => handleApproveAllStudents(schedule.id)}
+                      className="flex items-center space-x-2 bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded-lg transition-colors whitespace-nowrap"
+                    >
+                      <CheckCircle className="w-4 h-4" />
+                      <span>Approve All</span>
+                    </button>
+                    <button
+                      onClick={() => handleRejectAllStudents(schedule.id)}
+                      className="flex items-center space-x-2 bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-lg transition-colors whitespace-nowrap"
+                    >
+                      <XCircle className="w-4 h-4" />
+                      <span>Reject All</span>
+                    </button>
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+
+  // FIXED: Enhanced Calendar View Component with proper individual booking approval status
+  const renderCalendarView = () => (
+    <div className="space-y-6">
+      <div className="flex justify-between items-center">
+        <h2 className="text-2xl font-bold text-gray-900">Duty Schedule Calendar</h2>
+        {isAdmin && (
+          <button
+            onClick={() => setActiveTab('schedule-management')}
+            className="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded-lg transition-colors flex items-center space-x-2"
+          >
+            <Plus className="w-4 h-4" />
+            <span>Manage Schedules</span>
+          </button>
+        )}
+      </div>
+
+      {/* Calendar Navigation */}
+      <div className="card">
+        {/* Hospital Filter for Students */}
+        {user?.role === 'student' && (
+          <div className="flex items-center justify-between mb-4 p-4 bg-gray-50 rounded-lg">
+            <div className="flex items-center space-x-4">
+              <label className="text-sm font-medium text-gray-700">Filter by Hospital:</label>
+              <select
+                value={selectedHospital}
+                onChange={(e) => setSelectedHospital(e.target.value)}
+                className="input-field max-w-xs"
+              >
+                <option value="all">All Hospitals</option>
+                <option value="ISDH - Magsingal">ISDH - Magsingal</option>
+                <option value="ISDH - Sinait">ISDH - Sinait</option>
+                <option value="ISDH - Narvacan">ISDH - Narvacan</option>
+                <option value="ISPH - Gab. Silang">ISPH - Gab. Silang</option>
+                <option value="RHU - Sto. Domingo">RHU - Sto. Domingo</option>
+                <option value="RHU - Santa">RHU - Santa</option>
+                <option value="RHU - San Ildefonso">RHU - San Ildefonso</option>
+                <option value="RHU - Bantay">RHU - Bantay</option>
+              </select>
+            </div>
+            <div className="text-xs text-gray-600">
+              Choose a hospital to view only its schedules
+            </div>
+          </div>
+        )}
+
+        <div className="flex justify-between items-center mb-6">
+          <button
+            onClick={() => setCurrentDate(new Date(currentDate.getFullYear(), currentDate.getMonth() - 1))}
+            className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
+          >
+            <ChevronLeft className="w-5 h-5" />
+          </button>
+
+          <h3 className="text-xl font-semibold">
+            {currentDate.toLocaleDateString('en-US', { month: 'long', year: 'numeric' })}
+            {user?.role === 'student' && selectedHospital !== 'all' && (
+              <span className="block text-sm text-emerald-600 font-normal mt-1">
+                Showing schedules for: {selectedHospital}
+              </span>
+            )}
+          </h3>
+
+          <button
+            onClick={() => setCurrentDate(new Date(currentDate.getFullYear(), currentDate.getMonth() + 1))}
+            className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
+          >
+            <ChevronRight className="w-5 h-5" />
+          </button>
+        </div>
+
+        {/* Calendar Grid */}
+        <div className="overflow-x-auto sm:overflow-hidden rounded-lg border border-gray-200">
+          <div className="min-w-[720px] sm:min-w-0">
+            {/* Day headers */}
+            <div className="grid grid-cols-7 bg-gray-50">
+              {['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'].map(day => (
+                <div key={day} className="p-2 sm:p-4 text-center font-medium text-gray-700 text-xs sm:text-sm border-r border-gray-200 last:border-r-0">
+                  <span className="hidden sm:inline">{day}</span>
+                  <span className="sm:hidden">{day.slice(0, 3)}</span>
+                </div>
+              ))}
+            </div>
+
+            {/* Calendar body */}
+            {generateCalendar().map((week, weekIndex) => (
+              <div key={weekIndex} className="grid grid-cols-7 border-t border-gray-200">
+                {week.map((day, dayIndex) => {
+                  // FIXED: Role-based capacity calculation and booking logic with PROPER INDIVIDUAL APPROVAL STATUS
+                  const activeStudents = day.schedule?.schedule_students?.filter(ss => ss.status !== 'cancelled') || [];
+                  const studentCount = activeStudents.length;
+                  const maxStudents = day.schedule?.max_students || 2;
+                  const isFull = studentCount >= maxStudents;
+                  const myBooking = activeStudents.find(s => s.student_id === user.id);
+                  const isBooked = !!myBooking;
+                  // FIXED: Check individual booking status, not schedule status
+                  const isApproved = myBooking?.status === 'approved';
+                  const hasSameDayCancellation = user?.role === 'student' && checkSameDayCancellation(day.date.toISOString().split('T')[0]);
+
+                  // FIXED: Role-specific booking logic
+                  const canBook = user?.role === 'student' &&
+                    day.schedule &&
+                    !day.isPast &&
+                    !isFull &&
+                    !isBooked &&
+                    !hasSameDayCancellation &&
+                    day.isCurrentMonth;
+
+                  return (
+                    <div
+                      key={dayIndex}
+                      className={`min-h-[84px] sm:min-h-[120px] p-2 sm:p-3 border-r border-gray-200 last:border-r-0 ${!day.isCurrentMonth ? 'bg-gray-50 text-gray-400' : 'bg-white'
+                        } ${day.isToday ? 'bg-blue-50 border-2 border-blue-200' : ''}`}
+                    >
+                      <div className="flex justify-between items-start mb-2">
+                        <span className={`text-xs sm:text-sm font-medium ${day.isToday ? 'text-blue-600' : day.isCurrentMonth ? 'text-gray-900' : 'text-gray-400'
+                          }`}>
+                          {day.date.getDate()}
+                        </span>
+
+                        {day.schedule && (
+                          <div className="flex flex-col items-end space-y-1">
+                            {/* ROLE-BASED CAPACITY DISPLAY */}
+                            {isAdmin ? (
+                              // Admin view: Full management info
+                              <>
+                                <span className={`px-2 py-1 rounded-full text-xs font-medium ${isFull ? 'bg-red-100 text-red-800' :
+                                  studentCount > 0 ? 'bg-blue-100 text-blue-800' :
+                                    'bg-gray-100 text-gray-600'
+                                  }`}>
+                                  {studentCount}/{maxStudents}
+                                </span>
+                                <span className={`px-2 py-1 rounded-full text-xs font-medium ${day.schedule.status === 'approved'
+                                  ? 'bg-green-100 text-green-800'
+                                  : 'bg-yellow-100 text-yellow-800'
+                                  }`}>
+                                  {day.schedule.status}
+                                </span>
+                              </>
+                            ) : user?.role === 'student' ? (
+                              // Student view: Booking-focused info with FIXED individual approval status
+                              <>
+                                <span className={`px-2 py-1 rounded-full text-xs font-medium ${isFull ? 'bg-red-100 text-red-800' :
+                                  isBooked ? 'bg-blue-100 text-blue-800' :
+                                    'bg-green-100 text-green-800'
+                                  }`}>
+                                  {isFull ? 'FULL' : isBooked ? 'BOOKED' : `${maxStudents - studentCount} LEFT`}
+                                </span>
+                                {/* FIXED: Show individual booking approval status */}
+                                {isBooked && (
+                                  <span className={`px-2 py-1 rounded-full text-xs font-medium ${isApproved ? 'bg-green-100 text-green-800' : 'bg-yellow-100 text-yellow-800'
+                                    }`}>
+                                    {isApproved ? 'APPROVED' : 'PENDING'}
+                                  </span>
+                                )}
+                              </>
+                            ) : (
+                              // Parent view: Child-focused info with individual booking status
+                              <>
+                                {isBooked ? (
+                                  <>
+                                    <span className={`px-2 py-1 rounded-full text-xs font-medium ${myBooking?.status === 'approved' ? 'bg-green-100 text-green-800' :
+                                      myBooking?.status === 'completed' ? 'bg-blue-100 text-blue-800' :
+                                        myBooking?.status === 'cancelled' ? 'bg-red-100 text-red-800' :
+                                          'bg-yellow-100 text-yellow-800'
+                                      }`}>
+                                      {myBooking?.status === 'approved' ? 'APPROVED' :
+                                        myBooking?.status === 'completed' ? 'COMPLETED' :
+                                          myBooking?.status === 'cancelled' ? 'CANCELLED' :
+                                            'PENDING'}
+                                    </span>
+                                    <span className="px-2 py-1 rounded-full text-xs font-medium bg-blue-100 text-blue-800 mt-1">
+                                      YOUR CHILD
+                                    </span>
+                                  </>
+                                ) : (
+                                  <span className="px-2 py-1 rounded-full text-xs font-medium bg-gray-100 text-gray-600">
+                                    {studentCount}/{maxStudents}
+                                  </span>
+                                )}
+                              </>
+                            )}
+                          </div>
+                        )}
+                      </div>
+
+                      {day.schedule && (
+                        <div className="space-y-1">
+                          {/* ROLE-BASED STUDENT DISPLAY */}
+                          {isAdmin ? (
+                            // Admin: Show all students with management options
+                            activeStudents.map((assignment, idx) => (
+                              <div
+                                key={idx}
+                                className="text-xs px-2 py-1 rounded bg-gray-100 text-gray-700 flex justify-between items-center"
+                              >
+                                <span className="truncate">{assignment.profiles?.full_name?.split(' ')[0] || 'Student'}</span>
+                                <span className={`w-2 h-2 rounded-full ${day.schedule.status === 'approved' ? 'bg-green-500' : 'bg-yellow-500'
+                                  }`}></span>
+                              </div>
+                            ))
+                          ) : user?.role === 'student' ? (
+                            // Student: Show their own booking prominently, others less prominent
+                            activeStudents.map((assignment, idx) => (
+                              <div
+                                key={idx}
+                                className={`text-xs px-2 py-1 rounded truncate ${assignment.student_id === user.id
+                                  ? 'bg-blue-100 text-blue-800 font-medium border border-blue-200'
+                                  : 'bg-gray-50 text-gray-600'
+                                  }`}
+                              >
+                                {assignment.student_id === user.id ? 'YOU' : assignment.profiles?.full_name?.split(' ')[0] || 'Student'}
+                              </div>
+                            ))
+                          ) : (
+                            // Parent: Only show if their child is assigned
+                            activeStudents
+                              .filter(assignment => assignment.student_id === user.student_id)
+                              .map((assignment, idx) => (
+                                <div
+                                  key={idx}
+                                  className="text-xs px-2 py-1 rounded bg-green-100 text-green-800 font-medium"
+                                >
+                                  YOUR CHILD
+                                </div>
+                              ))
+                          )}
+
+                          {/* Show time and location */}
+                          <div className="text-xs text-gray-500">
+                            {day.schedule.shift_start} - {day.schedule.shift_end}
+                          </div>
+                          {day.schedule.location && (
+                            <div className="text-xs text-gray-500 truncate">
+                              📍 {day.schedule.location}
+                            </div>
+                          )}
+                          {day.schedule.description && (
+                            <div className="text-xs text-gray-400 truncate">
+                              {day.schedule.description}
+                            </div>
+                          )}
+                        </div>
+                      )}
+
+                      {/* ROLE-BASED ACTION BUTTONS */}
+                      {user?.role === 'student' && (
+                        <>
+                          {/* Booking button for students */}
+                          {canBook && (
+                            <button
+                              onClick={() => handleBookDuty(day.schedule.id, day.date.toISOString().split('T')[0])}
+                              className="mt-2 w-full text-xs bg-emerald-600 text-white px-2 py-1 rounded hover:bg-emerald-700 transition-colors"
+                            >
+                              Book Duty
+                            </button>
+                          )}
+
+                          {/* Same-day cancellation warning */}
+                          {hasSameDayCancellation && day.isCurrentMonth && (
+                            <div className="mt-2 text-xs text-orange-600 font-medium text-center bg-orange-50 px-2 py-1 rounded">
+                              Cannot book today (cancelled earlier)
+                            </div>
+                          )}
+                        </>
+                      )}
+
+                      {/* ROLE-BASED STATUS MESSAGES */}
+                      {isFull && day.isCurrentMonth && day.schedule && (
+                        <div className={`mt-2 text-xs font-medium text-center ${isAdmin ? 'text-red-600' :
+                          user?.role === 'student' ? 'text-red-600' :
+                            'text-gray-600'
+                          }`}>
+                          {isAdmin ? `Full (${studentCount}/${maxStudents})` :
+                            user?.role === 'student' ? 'Duty Full' :
+                              'Full Schedule'}
+                        </div>
+                      )}
+
+                      {/* FIXED: Show proper approval status for students */}
+                      {isBooked && day.schedule && user?.role === 'student' && (
+                        <div className={`mt-2 text-xs font-medium text-center ${isApproved ? 'text-green-600' : 'text-yellow-600'
+                          }`}>
+                          {isApproved ? 'Your Duty Approved ✓' : 'Awaiting Admin Approval'}
+                        </div>
+                      )}
+
+                      {day.isPast && day.isCurrentMonth && !day.schedule && (
+                        <div className="mt-2 text-xs text-gray-400 text-center">
+                          {isAdmin ? 'No schedule created' :
+                            user?.role === 'student' ? 'Past date' :
+                              'No duty'}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Role-based Legend */}
+        <div className="mt-6 p-4 bg-gray-50 rounded-lg">
+          <h4 className="font-medium text-gray-900 mb-3">
+            {isAdmin ? 'Admin View Legend' :
+              user?.role === 'student' ? 'Student View Legend' :
+                'Parent View Legend'}
+          </h4>
+
+          {isAdmin ? (
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
+              <div className="flex items-center space-x-2">
+                <div className="w-4 h-4 bg-green-100 border border-green-300 rounded"></div>
+                <span>Approved Schedule</span>
+              </div>
+              <div className="flex items-center space-x-2">
+                <div className="w-4 h-4 bg-yellow-100 border border-yellow-300 rounded"></div>
+                <span>Pending Approval</span>
+              </div>
+              <div className="flex items-center space-x-2">
+                <div className="w-4 h-4 bg-red-100 border border-red-300 rounded"></div>
+                <span>Fully Booked</span>
+              </div>
+              <div className="flex items-center space-x-2">
+                <div className="w-4 h-4 bg-blue-100 border border-blue-300 rounded"></div>
+                <span>Has Students</span>
+              </div>
+            </div>
+          ) : user?.role === 'student' ? (
+            <div className="space-y-3">
+              <div className="grid grid-cols-2 md:grid-cols-3 gap-4 text-sm">
+                <div className="flex items-center space-x-2">
+                  <div className="w-4 h-4 bg-green-100 border border-green-300 rounded"></div>
+                  <span>Available to Book</span>
+                </div>
+                <div className="flex items-center space-x-2">
+                  <div className="w-4 h-4 bg-blue-100 border border-blue-300 rounded"></div>
+                  <span>Your Booking</span>
+                </div>
+                <div className="flex items-center space-x-2">
+                  <div className="w-4 h-4 bg-red-100 border border-red-300 rounded"></div>
+                  <span>Fully Booked</span>
+                </div>
+              </div>
+              <div className="text-xs text-gray-600 bg-yellow-50 p-2 rounded border-l-2 border-yellow-300">
+                <strong>Booking Rules:</strong> You cannot cancel on the actual day of your duty.
+                If you cancel a booking today, you cannot book another duty for that same date until tomorrow.
+              </div>
+            </div>
+          ) : (
+            <div className="grid grid-cols-2 md:grid-cols-3 gap-4 text-sm">
+              <div className="flex items-center space-x-2">
+                <div className="w-4 h-4 bg-blue-100 border border-blue-300 rounded"></div>
+                <span>Child Assigned</span>
+              </div>
+              <div className="flex items-center space-x-2">
+                <div className="w-4 h-4 bg-green-100 border border-green-300 rounded"></div>
+                <span>Confirmed Duty</span>
+              </div>
+              <div className="flex items-center space-x-2">
+                <div className="w-4 h-4 bg-yellow-100 border border-yellow-300 rounded"></div>
+                <span>Pending Confirmation</span>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+
+  // My Duties View Component
+  const renderDutiesView = () => (
+    <div className="space-y-6">
+      <div className="flex justify-between items-center">
+        <h2 className="text-2xl font-bold text-gray-900">My Duties</h2>
+        <div className="flex space-x-2">
+          <button className="btn-secondary flex items-center space-x-2">
+            <Filter className="w-4 h-4" />
+            <span>Filter</span>
+          </button>
+        </div>
+      </div>
+
+      <div className="grid gap-4">
+        {studentDuties.map((duty) => (
+          <div key={duty.id} className="card hover:shadow-lg transition-shadow">
+            <div className="flex justify-between items-start">
+              <div className="flex-1">
+                <div className="flex items-center space-x-3 mb-3">
+                  <CalendarIcon className="w-5 h-5 text-emerald-600" />
+                  <span className="font-semibold text-lg">
+                    {new Date(duty.schedules.date).toLocaleDateString('en-US', {
+                      weekday: 'long',
+                      year: 'numeric',
+                      month: 'long',
+                      day: 'numeric'
+                    })}
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-sm">
+                  <div>
+                    <p className="text-gray-600">Booked:</p>
+                    <p className="font-medium">{new Date(duty.booking_time).toLocaleString()}</p>
+                  </div>
+                  <div>
+                    <p className="text-gray-600">Location:</p>
+                    <p className="font-medium">{duty.schedules.location || 'N/A'}</p>
+                  </div>
+                  <div>
+                    <p className="text-gray-600">Approval Status:</p>
+                    <span className={`inline-flex px-2 py-1 rounded-full text-xs font-medium ${duty.status === 'completed' ? 'bg-blue-100 text-blue-800' :
+                      duty.status === 'approved' ? 'bg-green-100 text-green-800' :
+                        duty.status === 'cancelled' ? 'bg-red-100 text-red-800' :
+                          'bg-yellow-100 text-yellow-800'
+                      }`}>
+
+                      {duty.status === 'completed' ? 'Completed' :
+                        duty.status === 'approved' ? 'Approved' :
+                          duty.status === 'cancelled' ? 'Cancelled' :
+                            'Pending Approval'}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex flex-col items-end space-y-2 ml-4">
+                {/* Cancel button - only for active bookings before duty day */}
+                {duty.status === 'booked' && canCancelDuty(duty.schedules.date) && (
+                  <button
+                    onClick={() => handleCancelDuty(duty.id, duty.schedules.date)}
+                    className="flex items-center space-x-1 text-red-600 hover:text-red-700 text-sm px-3 py-1 rounded-lg hover:bg-red-50 transition-colors"
+                  >
+                    <Ban className="w-4 h-4" />
+                    <span>Cancel</span>
+                  </button>
+                )}
+
+                {!canCancelDuty(duty.schedules.date) && duty.status === 'booked' && (
+                  <span className="text-xs text-red-500 px-3 py-1 bg-red-50 rounded-lg border border-red-200">
+                    Cannot cancel on duty day
+                  </span>
+                )}
+
+                {/* Pending approval indicator */}
+                {duty.status === 'booked' && duty.schedules.status === 'pending' && (
+                  <span className="text-xs text-yellow-600 px-3 py-1 bg-yellow-50 rounded-lg border border-yellow-200">
+                    ⏳ Awaiting Admin Approval
+                  </span>
+                )}
+
+                {/* Complete duty button - only for approved bookings */}
+                {duty.status === 'booked' && duty.schedules.status === 'approved' && (
+                  <button
+                    onClick={() => handleCompleteDuty(duty.id)}
+                    className="flex items-center space-x-1 text-emerald-600 hover:text-emerald-700 text-sm px-3 py-1 rounded-lg hover:bg-emerald-50 transition-colors"
+                    title="Mark duty as completed"
+                  >
+                    <Award className="w-4 h-4" />
+                    <span>Complete</span>
+                  </button>
+                )}
+
+                {/* Print certificate button for completed duties */}
+                {duty.status === 'completed' && (
+                  <button
+                    onClick={() => handlePrintCertificate(duty)}
+                    className="flex items-center space-x-1 text-blue-600 hover:text-blue-700 text-sm px-3 py-1 rounded-lg hover:bg-blue-50 transition-colors"
+                    title="Print completion certificate"
+                  >
+                    <Printer className="w-4 h-4" />
+                    <span>Print Certificate</span>
+                  </button>
+                )}
+
+                {/* Delete button - only for pending bookings (not yet approved) */}
+                {duty.status === 'booked' && duty.schedules.status === 'pending' && (
+                  <button
+                    onClick={() => handleDeleteDuty(duty.id)}
+                    className="flex items-center space-x-1 text-gray-400 hover:text-red-600 text-sm px-2 py-1 rounded-lg hover:bg-red-50 transition-colors"
+                    title="Delete pending booking"
+                  >
+                    <Trash2 className="w-4 h-4" />
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+        ))}
+
+        {studentDuties.length === 0 && (
+          <div className="text-center py-12">
+            <Clock className="w-16 h-16 mx-auto mb-4 text-gray-300" />
+            <h3 className="text-lg font-medium text-gray-900 mb-2">No duties scheduled yet</h3>
+            <p className="text-gray-600 mb-4">Visit the Schedule Calendar to book your duties.</p>
+            <button
+              onClick={() => setActiveTab('schedule')}
+              className="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded-lg transition-colors"
+            >
+              View Calendar
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+
+  // Notifications View Component
+  const renderNotificationsView = () => (
+    <div className="space-y-6">
+      <div className="flex justify-between items-center">
+        <h2 className="text-2xl font-bold text-gray-900">Notifications</h2>
+        <button
+          onClick={async () => {
+            try {
+              await supabase
+                .from('notifications')
+                .update({ read: true, read_at: new Date().toISOString() })
+                .eq('user_id', user.id)
+                .eq('read', false);
+
+              setNotifications(prev => prev.map(n => ({ ...n, read: true })));
+              setUnreadCount(0);
+            } catch (error) {
+              console.error('Error marking all as read:', error);
+            }
+          }}
+          className="text-emerald-600 hover:text-emerald-700 text-sm font-medium"
+        >
+          Mark All as Read
+        </button>
+      </div>
+
+      <div className="space-y-4">
+        {notifications.map((notification) => (
+          <div
+            key={notification.id}
+            className={`card cursor-pointer transition-all hover:shadow-lg ${!notification.read ? 'border-l-4 border-l-emerald-500 bg-emerald-50' : ''
+              }`}
+            onClick={() => handleNotificationClick(notification)}
+          >
+            <div className="flex items-start space-x-4">
+              <div className={`p-2 rounded-full ${notification.type === 'success' ? 'bg-green-100 text-green-600' :
+                notification.type === 'warning' ? 'bg-yellow-100 text-yellow-600' :
+                  notification.type === 'error' ? 'bg-red-100 text-red-600' :
+                    'bg-blue-100 text-blue-600'
+                }`}>
+                {notification.type === 'success' ? <CheckCircle className="w-5 h-5" /> :
+                  notification.type === 'warning' ? <AlertTriangle className="w-5 h-5" /> :
+                    notification.type === 'error' ? <XCircle className="w-5 h-5" /> :
+                      <Info className="w-5 h-5" />}
+              </div>
+              <div className="flex-1">
+                <div className="flex items-center justify-between">
+                  <h4 className="font-medium text-gray-900">{notification.title}</h4>
+                  <div className="flex items-center space-x-2">
+                    <span className="text-sm text-gray-500">
+                      {new Date(notification.created_at).toLocaleDateString()}
+                    </span>
+                    {!notification.read && (
+                      <div className="w-3 h-3 bg-blue-500 rounded-full"></div>
+                    )}
+                  </div>
+                </div>
+                <p className="text-gray-700 mt-1">{notification.message}</p>
+                <p className="text-sm text-gray-500 mt-2">
+                  {new Date(notification.created_at).toLocaleTimeString()}
+                </p>
+              </div>
+            </div>
+          </div>
+        ))}
+
+        {notifications.length === 0 && (
+          <div className="text-center py-12">
+            <Bell className="w-16 h-16 mx-auto mb-4 text-gray-300" />
+            <h3 className="text-lg font-medium text-gray-900 mb-2">No notifications yet</h3>
+            <p className="text-gray-600">You'll receive notifications here when there are updates.</p>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+
+  const renderContent = () => {
+    switch (activeTab) {
+      case 'dashboard':
+        return renderDashboardView();
+      case 'pending':
+        return renderPendingApprovalsView();
+      case 'schedule':
+        return renderCalendarView();
+      case 'duties':
+        return renderDutiesView();
+      case 'notifications':
+        return renderNotificationsView();
+      case 'student-management':
+        return <StudentManagement />;
+      case 'user-management':
+        return <UserManagement />;
+      case 'reports':
+        return <ReportsAnalytics />;
+      case 'profile':
+        return <ProfileSettings user={user} onProfileUpdate={onProfileUpdate} />;
+      case 'schedule-management':
+        return <ScheduleManagement />;
+      case 'logs':
+        return renderSystemLogsView();
+      case 'child-duties':
+        return (
+          <div className="space-y-6">
+            <div className="flex justify-between items-center">
+              <h2 className="text-3xl font-bold text-gray-900">Child's Duty History</h2>
+              <div className="text-sm text-gray-600">
+                Monitoring your child's clinical duty assignments
+              </div>
+            </div>
+
+            <div className="grid gap-4">
+              {childDuties.map((duty) => (
+                <div key={duty.id} className="card hover:shadow-lg transition-shadow">
+                  <div className="flex justify-between items-start">
+                    <div className="flex-1">
+                      <div className="flex items-center space-x-3 mb-3">
+                        <CalendarIcon className="w-5 h-5 text-emerald-600" />
+                        <span className="font-semibold text-lg">
+                          {new Date(duty.schedules.date).toLocaleDateString('en-US', {
+                            weekday: 'long',
+                            year: 'numeric',
+                            month: 'long',
+                            day: 'numeric'
+                          })}
+                        </span>
+                      </div>
+
+                      <div className="grid grid-cols-1 md:grid-cols-4 gap-4 text-sm">
+                        <div>
+                          <p className="text-gray-600">Booked:</p>
+                          <p className="font-medium">{new Date(duty.booking_time).toLocaleString()}</p>
+                        </div>
+                        <div>
+                          <p className="text-gray-600">Location:</p>
+                          <p className="font-medium">{duty.schedules.location || 'N/A'}</p>
+                        </div>
+                        <div>
+                          <p className="text-gray-600">Shift:</p>
+                          <p className="font-medium">{duty.schedules.shift_start} - {duty.schedules.shift_end}</p>
+                        </div>
+                        <div>
+                          <p className="text-gray-600">Status:</p>
+                          <span className={`inline-flex px-2 py-1 rounded-full text-xs font-medium ${duty.status === 'completed' ? 'bg-blue-100 text-blue-800' :
+                            duty.status === 'approved' ? 'bg-green-100 text-green-800' :
+                              duty.status === 'cancelled' ? 'bg-red-100 text-red-800' :
+                                'bg-yellow-100 text-yellow-800'
+                            }`}>
+
+                            {duty.status === 'completed' ? 'Completed' :
+                              duty.status === 'approved' ? 'Approved' :
+                                duty.status === 'cancelled' ? 'Cancelled' :
+                                  'Pending Approval'}
+                          </span>
+                        </div>
+                      </div>
+
+                      {duty.schedules.description && (
+                        <div className="mt-3 p-3 bg-gray-50 rounded-lg">
+                          <p className="text-sm text-gray-600 mb-1">Schedule Description:</p>
+                          <p className="text-sm font-medium text-gray-900">{duty.schedules.description}</p>
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="flex flex-col items-end space-y-2 ml-4">
+                      {duty.status === 'completed' && (
+                        <div className="text-xs text-green-600 px-3 py-1 bg-green-50 rounded-lg border border-green-200">
+                          ✓ Duty Completed Successfully
+                        </div>
+                      )}
+
+                      {duty.status === 'cancelled' && (
+                        <div className="text-xs text-red-600 px-3 py-1 bg-red-50 rounded-lg border border-red-200">
+                          ✗ Duty Cancelled
+                        </div>
+                      )}
+
+                      {duty.status === 'booked' && duty.schedules.status === 'approved' && (
+                        <div className="text-xs text-emerald-600 px-3 py-1 bg-emerald-50 rounded-lg border border-emerald-200">
+                          ✅ Schedule Approved - Active Duty
+                        </div>
+                      )}
+
+                      {duty.status === 'booked' && duty.schedules.status === 'pending' && (
+                        <div className="text-xs text-yellow-600 px-3 py-1 bg-yellow-50 rounded-lg border border-yellow-200">
+                          ⏳ Waiting for Admin Approval
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              ))}
+
+              {childDuties.length === 0 && (
+                <div className="text-center py-12">
+                  <Eye className="w-16 h-16 mx-auto mb-4 text-gray-300" />
+                  <h3 className="text-lg font-medium text-gray-900 mb-2">No Duty History Yet</h3>
+                  <p className="text-gray-600 mb-4">Your child hasn't been assigned any duties yet. Duty assignments will appear here once they start booking their clinical schedules.</p>
+                  <button
+                    onClick={() => setActiveTab('schedule')}
+                    className="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded-lg transition-colors"
+                  >
+                    View Schedule Calendar
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
+        );
+      default:
+        return renderDashboardView();
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-gray-50">
+      <ToastContainer toasts={toasts} removeToast={removeToast} />
+
+      {/* Header with Navigation and Notifications */}
+      <header className="bg-white shadow-sm border-b border-gray-200 sticky top-0 z-40">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+          <div className="flex justify-between items-center h-16">
+            {/* Left side - Logo and Mobile Menu */}
+            <div className="flex items-center space-x-4">
+              <button
+                onClick={() => setSidebarOpen(!sidebarOpen)}
+                className="lg:hidden p-2 rounded-lg hover:bg-gray-100 active:bg-gray-200 transition-colors"
+                aria-label={sidebarOpen ? "Close menu" : "Open menu"}
+                aria-expanded={sidebarOpen}
+              >
+                {sidebarOpen ? (
+                  <X className="w-6 h-6 text-gray-700" />
+                ) : (
+                  <Menu className="w-6 h-6 text-gray-700" />
+                )}
+              </button>
+
+              <div className="flex items-center space-x-3">
+                <div className="w-10 h-10 rounded-lg overflow-hidden flex items-center justify-center">
+                  <img
+                    src="/image0.png"
+                    alt="Comadronas System Logo"
+                    className="w-full h-full object-contain"
+                  />
+                </div>
+                <div>
+                  <h1 className="text-xl font-bold text-gray-900">
+                    Kumadronas System
+                  </h1>
+                  <p className="text-xs text-gray-600 hidden sm:block">
+                    Ilocos Sur Community College
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            {/* Right side - Notifications and User Menu */}
+            <div className="flex items-center space-x-4">
+              {/* Notifications */}
+              <div className="relative">
+                <button
+                  onClick={() => setShowNotifications(!showNotifications)}
+                  className="p-2 text-gray-500 hover:text-gray-700 rounded-lg hover:bg-gray-100 transition-colors relative"
+                >
+                  <Bell className="w-6 h-6" />
+                  {(unreadCount + pendingSignupsCount) > 0 && (
+                    <span className="absolute -top-1 -right-1 bg-red-500 text-white text-xs rounded-full w-5 h-5 flex items-center justify-center animate-pulse">
+                      {(unreadCount + pendingSignupsCount) > 9 ? '9+' : (unreadCount + pendingSignupsCount)}
+                    </span>
+                  )}
+                </button>
+
+                {/* Notifications Dropdown */}
+                {showNotifications && (
+                  <div className="fixed sm:absolute top-16 sm:top-auto right-0 sm:right-0 left-1/2 sm:left-auto -translate-x-1/2 sm:translate-x-0 mt-0 sm:mt-2 w-[92vw] max-w-md sm:w-80 bg-white rounded-lg shadow-lg border border-gray-200 z-50">
+                    <div className="p-4 border-b border-gray-200 sticky top-0 bg-white z-10 rounded-t-lg">
+                      <div className="flex items-center justify-between">
+                        <h3 className="font-medium text-gray-900">Notifications</h3>
+                        <button
+                          onClick={() => setShowNotifications(false)}
+                          className="text-gray-400 hover:text-gray-600"
+                        >
+                          <X className="w-4 h-4" />
+                        </button>
+                      </div>
+                    </div>
+                    <div className="max-h-[75vh] sm:max-h-96 overflow-y-auto">
+                      {isAdmin && pendingSignupsCount > 0 && (
+                        <div className="px-4 py-3 bg-amber-50 border-b border-amber-100 cursor-pointer hover:bg-amber-100"
+                          onClick={() => { setActiveTab('user-management'); setShowNotifications(false); }}>
+                          <p className="text-sm font-semibold text-amber-800">Pending Student Signups</p>
+                          <p className="text-xs text-amber-600">{pendingSignupsCount} student{pendingSignupsCount > 1 ? 's' : ''} waiting for approval</p>
+                        </div>
+                      )}
+                      {notifications.slice(0, 5).map((notification) => (
+                        <div
+                          key={notification.id}
+                          className={`p-4 border-b border-gray-100 hover:bg-gray-50 cursor-pointer ${!notification.read ? 'bg-blue-50' : ''
+                            }`}
+                          onClick={() => {
+                            handleNotificationClick(notification);
+                            setShowNotifications(false);
+                          }}
+                        >
+                          <div className="flex items-start space-x-3">
+                            <div className={`w-2 h-2 rounded-full mt-2 ${notification.type === 'success' ? 'bg-green-500' :
+                              notification.type === 'warning' ? 'bg-yellow-500' :
+                                notification.type === 'error' ? 'bg-red-500' :
+                                  'bg-blue-500'
+                              }`}></div>
+                            <div className="flex-1 min-w-0">
+                              <p className="text-sm font-medium text-gray-900 truncate">
+                                {notification.title}
+                              </p>
+                              <p className="text-sm text-gray-600 truncate">
+                                {notification.message}
+                              </p>
+                              <p className="text-xs text-gray-400 mt-1">
+                                {new Date(notification.created_at).toLocaleString()}
+                              </p>
+                            </div>
+                            {!notification.read && (
+                              <div className="w-2 h-2 bg-blue-500 rounded-full"></div>
+                            )}
+                          </div>
+                        </div>
+                      ))}
+                      {notifications.length === 0 && (
+                        <div className="p-8 text-center text-gray-500">
+                          <Bell className="w-8 h-8 mx-auto mb-2 text-gray-300" />
+                          <p>No notifications</p>
+                        </div>
+                      )}
+                      {notifications.length > 5 && (
+                        <div className="p-3 text-center border-t border-gray-200">
+                          <button
+                            onClick={() => {
+                              setActiveTab('notifications');
+                              setShowNotifications(false);
+                            }}
+                            className="text-emerald-600 hover:text-emerald-700 text-sm font-medium"
+                          >
+                            View all notifications
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* User Profile */}
+              <div className="relative flex items-center space-x-3">
+                <div className="hidden sm:block text-right">
+                  <p className="text-sm font-medium text-gray-900">{user?.full_name}</p>
+                  <p className="text-xs text-gray-500 capitalize">{user?.role}</p>
+                </div>
+                <button
+                  onClick={() => setShowUserMenu(!showUserMenu)}
+                  className="w-10 h-10 rounded-full overflow-hidden border-2 border-white shadow-lg focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                  aria-haspopup="menu"
+                  aria-expanded={showUserMenu}
+                >
+                  {user?.avatar_url ? (
+                    <img
+                      src={user.avatar_url}
+                      alt="Profile"
+                      className="w-full h-full object-cover"
+                    />
+                  ) : (
+                    <div className="w-full h-full bg-gradient-to-r from-emerald-600 to-slate-600 flex items-center justify-center">
+                      {isAdmin ?
+                        <Shield className="w-5 h-5 text-white" /> :
+                        <User className="w-5 h-5 text-white" />
+                      }
+                    </div>
+                  )}
+                </button>
+                <button
+                  onClick={handleSignOut}
+                  className="hidden sm:inline-flex p-2 text-gray-500 hover:text-gray-700 rounded-lg hover:bg-gray-100 transition-colors"
+                  title="Sign Out"
+                >
+                  <LogOut className="w-5 h-5" />
+                </button>
+
+                {showUserMenu && (
+                  <div className="fixed sm:absolute top-16 sm:top-auto right-4 sm:right-0 left-4 sm:left-auto mt-2 sm:mt-2 bg-white w-auto sm:w-48 max-w-md rounded-lg shadow-lg border border-gray-200 z-50">
+                    <div className="py-2">
+                      <button
+                        onClick={() => {
+                          setActiveTab('profile');
+                          setShowUserMenu(false);
+                        }}
+                        className="w-full flex items-center space-x-2 px-4 py-2 text-left text-sm text-gray-700 hover:bg-gray-100"
+                      >
+                        <User className="w-4 h-4" />
+                        <span>Profile</span>
+                      </button>
+                      <button
+                        onClick={() => {
+                          setShowUserMenu(false);
+                          handleSignOut();
+                        }}
+                        className="w-full flex items-center space-x-2 px-4 py-2 text-left text-sm text-red-600 hover:bg-red-50"
+                      >
+                        <LogOut className="w-4 h-4" />
+                        <span>Sign Out</span>
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      </header>
+
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        <div className="flex gap-8">
+          {/* Sidebar Navigation - Mobile Drawer & Desktop Sticky */}
+          <aside className={`
+            fixed lg:sticky
+            top-0 lg:top-24
+            left-0 lg:left-auto
+            h-full lg:h-fit
+            w-64 sm:w-72 lg:w-64
+            bg-white lg:bg-transparent
+            shadow-2xl lg:shadow-none
+            z-40 lg:z-auto
+            transform transition-transform duration-300 ease-in-out
+            ${sidebarOpen ? 'translate-x-0' : '-translate-x-full lg:translate-x-0'}
+            overflow-y-auto lg:overflow-visible
+            pb-20 lg:pb-0
+          `}>
+            <div className="p-4 lg:p-0 space-y-2">
+              {/* Mobile Header */}
+              <div className="flex lg:hidden items-center justify-between mb-6 pb-4 border-b border-gray-200">
+                <div className="flex items-center space-x-3">
+                  <div className="w-10 h-10 rounded-lg overflow-hidden flex items-center justify-center">
+                    <img
+                      src="/image0.png"
+                      alt="Comadronas System Logo"
+                      className="w-full h-full object-contain"
+                    />
+                  </div>
+                  <div>
+                    <h2 className="font-bold text-gray-900">Menu</h2>
+                    <p className="text-xs text-gray-600">Navigation</p>
+                  </div>
+                </div>
+                <button
+                  onClick={() => setSidebarOpen(false)}
+                  className="p-2 rounded-lg hover:bg-gray-100 transition-colors"
+                  aria-label="Close menu"
+                >
+                  <X className="w-5 h-5 text-gray-600" />
+                </button>
+              </div>
+
+              {/* Navigation Menu */}
+              <nav className="space-y-1">
+                {menuItems.map((item) => {
+                  const Icon = item.icon;
+                  return (
+                    <button
+                      key={item.id}
+                      onClick={() => {
+                        setActiveTab(item.id);
+                        setSidebarOpen(false);
+                      }}
+                      className={`w-full flex items-center justify-between px-4 py-3 rounded-lg text-left transition-all duration-200 ${activeTab === item.id
+                        ? 'bg-gradient-to-r from-emerald-600 to-emerald-700 text-white shadow-lg transform scale-105'
+                        : 'text-slate-700 hover:bg-slate-100 hover:text-slate-900'
+                        }`}
+                    >
+                      <div className="flex items-center space-x-3">
+                        <Icon className="w-5 h-5 flex-shrink-0" />
+                        <span className="font-medium text-sm sm:text-base">{item.label}</span>
+                      </div>
+                      {item.badge > 0 && (
+                        <span className="bg-red-500 text-white text-xs rounded-full w-5 h-5 flex items-center justify-center flex-shrink-0">
+                          {item.badge > 9 ? '9+' : item.badge}
+                        </span>
+                      )}
+                    </button>
+                  );
+                })}
+              </nav>
+
+              {/* User Info Card in Sidebar */}
+              <div className="mt-8 p-4 bg-gradient-to-r from-emerald-50 to-slate-50 rounded-lg border border-emerald-200">
+                <div className="flex items-center space-x-3">
+                  <div className="w-12 h-12 rounded-full overflow-hidden flex items-center justify-center bg-white border-2 border-emerald-200 flex-shrink-0">
+                    <img
+                      src="/image0.png"
+                      alt="Comadronas System Logo"
+                      className="w-full h-full object-contain"
+                    />
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <p className="font-medium text-gray-900 truncate">{user?.full_name}</p>
+                    <p className="text-sm text-gray-600 capitalize">{user?.role}</p>
+                    {user?.email && (
+                      <p className="text-xs text-gray-500 truncate">{user.email}</p>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              {/* Mobile Sign Out Button */}
+              <button
+                onClick={handleSignOut}
+                className="lg:hidden w-full flex items-center justify-center space-x-2 px-4 py-3 mt-4 bg-red-50 text-red-600 hover:bg-red-100 rounded-lg transition-colors duration-200"
+              >
+                <LogOut className="w-5 h-5" />
+                <span className="font-medium">Sign Out</span>
+              </button>
+            </div>
+          </aside>
+
+          {/* Mobile Overlay */}
+          {sidebarOpen && (
+            <div
+              className="fixed inset-0 bg-black bg-opacity-50 z-30 lg:hidden transition-opacity duration-300"
+              onClick={() => setSidebarOpen(false)}
+              aria-hidden="true"
+            ></div>
+          )}
+
+          {/* Main Content */}
+          <div className="flex-1 min-w-0">
+            {renderContent()}
+          </div>
+        </div>
+      </div>
+
+      {/* Logout Confirmation Modal */}
+      {showLogoutModal && (
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-3xl shadow-2xl w-full max-w-sm p-6 text-center">
+            <div className="w-14 h-14 bg-red-100 rounded-full flex items-center justify-center mx-auto mb-4">
+              <LogOut className="w-7 h-7 text-red-600" />
+            </div>
+            <h3 className="text-lg font-bold text-gray-900 mb-2">Sign Out?</h3>
+            <p className="text-sm text-gray-500 mb-6">
+              Are you sure you want to sign out of the Kumadronas System?
+            </p>
+            <div className="flex space-x-3">
+              <button
+                onClick={() => setShowLogoutModal(false)}
+                className="flex-1 py-2.5 rounded-xl bg-gray-100 text-gray-700 font-semibold text-sm hover:bg-gray-200 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={confirmSignOut}
+                className="flex-1 py-2.5 rounded-xl bg-red-500 hover:bg-red-600 text-white font-semibold text-sm transition-colors"
+              >
+                Sign Out
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Booking Confirmation Modal */}
+      {bookingToConfirm && (
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-3xl shadow-2xl w-full max-w-sm p-6 text-center">
+            <div className="w-14 h-14 bg-emerald-100 rounded-full flex items-center justify-center mx-auto mb-4">
+              <Calendar className="w-7 h-7 text-emerald-600" />
+            </div>
+            <h3 className="text-lg font-bold text-gray-900 mb-2">Confirm Booking</h3>
+            <p className="text-sm text-gray-500 mb-2">
+              Are you sure you want to schedule this duty?
+            </p>
+            <p className="text-base font-semibold text-emerald-700 bg-emerald-50 rounded-xl px-4 py-2 mb-6">
+              {new Date(bookingToConfirm.date + 'T00:00:00').toLocaleDateString('en-US', {
+                weekday: 'long', year: 'numeric', month: 'long', day: 'numeric'
+              })}
+            </p>
+            <div className="flex space-x-3">
+              <button
+                onClick={() => setBookingToConfirm(null)}
+                className="flex-1 py-2.5 rounded-xl bg-gray-100 text-gray-700 font-semibold text-sm hover:bg-gray-200 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={confirmBookDuty}
+                className="flex-1 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-sm transition-colors"
+              >
+                Confirm
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Approve Individual Student Modal */}
+      {approveToConfirm && (
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-3xl shadow-2xl w-full max-w-sm p-6 text-center">
+            <div className="w-14 h-14 bg-emerald-100 rounded-full flex items-center justify-center mx-auto mb-4">
+              <CheckCircle className="w-7 h-7 text-emerald-600" />
+            </div>
+            <h3 className="text-lg font-bold text-gray-900 mb-2">Approve Student?</h3>
+            <p className="text-sm text-gray-500 mb-2">
+              Do you want to approve the duty booking for
+            </p>
+            <p className="text-base font-semibold text-emerald-700 bg-emerald-50 rounded-xl px-4 py-2 mb-6">
+              {approveToConfirm.studentName}
+            </p>
+            <div className="flex space-x-3">
+              <button
+                onClick={() => setApproveToConfirm(null)}
+                className="flex-1 py-2.5 rounded-xl bg-gray-100 text-gray-700 font-semibold text-sm hover:bg-gray-200 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={confirmApproveStudent}
+                className="flex-1 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-sm transition-colors"
+              >
+                Approve
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Approve All Students Modal */}
+      {approveAllToConfirm && (
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-3xl shadow-2xl w-full max-w-sm p-6 text-center">
+            <div className="w-14 h-14 bg-emerald-100 rounded-full flex items-center justify-center mx-auto mb-4">
+              <CheckCircle className="w-7 h-7 text-emerald-600" />
+            </div>
+            <h3 className="text-lg font-bold text-gray-900 mb-2">Approve All Students?</h3>
+            <p className="text-sm text-gray-500 mb-2">
+              Do you want to approve the duty booking for all
+            </p>
+            <p className="text-base font-semibold text-emerald-700 bg-emerald-50 rounded-xl px-4 py-2 mb-1">
+              {approveAllToConfirm.studentCount} student{approveAllToConfirm.studentCount !== 1 ? 's' : ''}
+            </p>
+            <p className="text-xs text-gray-400 mb-6">This will mark the entire schedule as approved.</p>
+            <div className="flex space-x-3">
+              <button
+                onClick={() => setApproveAllToConfirm(null)}
+                className="flex-1 py-2.5 rounded-xl bg-gray-100 text-gray-700 font-semibold text-sm hover:bg-gray-200 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={confirmApproveAllStudents}
+                className="flex-1 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-sm transition-colors"
+              >
+                Approve All
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* FIXED: Reject Confirmation Modal - handles both individual and bulk rejections */}
+      {showRejectConfirm && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-lg p-6 w-full max-w-md mx-4">
+            <div className="flex items-center space-x-3 mb-4">
+              <div className="bg-red-100 p-2 rounded-full">
+                <XCircle className="w-6 h-6 text-red-600" />
+              </div>
+              <h3 className="text-lg font-semibold text-gray-900">
+                {studentToReject ? 'Reject Student Booking' : 'Reject All Bookings'}
+              </h3>
+            </div>
+            <p className="text-gray-600 mb-6">
+              {studentToReject
+                ? `Are you sure you want to reject the booking for ${studentToReject.studentName}? This student will be notified of the rejection.`
+                : 'Are you sure you want to reject this entire schedule? All student bookings will be cancelled and students will be notified.'
+              }
+            </p>
+            <div className="flex space-x-3">
+              <button
+                onClick={studentToReject ? confirmRejectStudent : confirmRejectAllStudents}
+                className="flex-1 bg-red-600 hover:bg-red-700 text-white font-medium py-2 px-4 rounded-lg transition-colors"
+              >
+                {studentToReject ? 'Reject Student' : 'Reject All'}
+              </button>
+              <button
+                onClick={() => {
+                  setShowRejectConfirm(false);
+                  setScheduleToReject(null);
+                  setStudentToReject(null);
+                }}
+                className="flex-1 bg-gray-200 hover:bg-gray-300 text-gray-800 font-medium py-2 px-4 rounded-lg transition-colors"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+export default Dashboard;

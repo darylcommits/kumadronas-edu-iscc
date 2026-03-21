@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(wc -l /c/Users/GIGABYTE/Desktop/iscc-v2-kumadronas-main/src/components/*.js)",
+      "Bash(cmd /c \"cd C:\\\\Users\\\\GIGABYTE\\\\Desktop\\\\iscc-v2-kumadronas-main && npm start\")",
+      "Bash(npm --version)"
+    ]
+  }
+}
