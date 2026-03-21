@@ -661,7 +661,7 @@ const AuthForm = ({ onBackToHome, initialError = '', onErrorShown, initialTab = 
                     {/* Phone Number */}
                     <div>
                       <label className="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5">
-                        Phone Number <span className="text-gray-400 normal-case font-normal">(optional)</span>
+                        Phone Number <span className="text-gray-400 normal-case font-normal"></span>
                       </label>
                       <div className="relative">
                         <Phone className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
