@@ -133,48 +133,70 @@ const AddScheduleModal = ({
   </div>
 );
 
-const BulkCreateModal = ({ generateBulkSchedules, setShowBulkModal }) => {
+const BulkCreateModal = ({ generateBulkSchedules, setShowBulkModal, hospitalLocations }) => {
   const [bulkData, setBulkData] = useState({
     startDate: '',
     endDate: '',
     daysOfWeek: [1, 2, 3, 4, 5]
   });
+  const [selectedHospitals, setSelectedHospitals] = useState(
+    hospitalLocations.map(h => ({ ...h, selected: false, shift: '08:00-20:00' }))
+  );
   const dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+  const toggleHospital = (idx) => {
+    setSelectedHospitals(prev =>
+      prev.map((h, i) => i === idx ? { ...h, selected: !h.selected } : h)
+    );
+  };
+
+  const setHospitalShift = (idx, shift) => {
+    setSelectedHospitals(prev =>
+      prev.map((h, i) => i === idx ? { ...h, shift } : h)
+    );
+  };
+
+  const chosenHospitals = selectedHospitals.filter(h => h.selected);
+
+  const handleCreate = () => {
+    if (!bulkData.startDate || !bulkData.endDate) return;
+    if (chosenHospitals.length === 0) return;
+    generateBulkSchedules(bulkData.startDate, bulkData.endDate, bulkData.daysOfWeek, chosenHospitals);
+    setShowBulkModal(false);
+  };
 
   return (
     <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-      <div className="bg-white rounded-lg p-6 w-full max-w-md mx-4 max-h-[90vh] overflow-y-auto">
+      <div className="bg-white rounded-lg p-6 w-full max-w-2xl mx-4 max-h-[90vh] overflow-y-auto">
         <h3 className="text-lg font-semibold mb-4">Bulk Create Schedules</h3>
-        <div className="space-y-4">
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Start Date</label>
-            <input
-              type="date"
-              value={bulkData.startDate}
-              onChange={(e) => setBulkData({ ...bulkData, startDate: e.target.value })}
-              className="input-field"
-              required
-            />
+        <div className="space-y-5">
+
+          {/* Date range */}
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Start Date</label>
+              <input
+                type="date"
+                value={bulkData.startDate}
+                onChange={(e) => setBulkData({ ...bulkData, startDate: e.target.value })}
+                className="input-field"
+                required
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">End Date</label>
+              <input
+                type="date"
+                value={bulkData.endDate}
+                onChange={(e) => setBulkData({ ...bulkData, endDate: e.target.value })}
+                className="input-field"
+                required
+                min={bulkData.startDate}
+              />
+            </div>
           </div>
 
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">End Date</label>
-            <input
-              type="date"
-              value={bulkData.endDate}
-              onChange={(e) => setBulkData({ ...bulkData, endDate: e.target.value })}
-              className="input-field"
-              required
-              min={bulkData.startDate}
-            />
-          </div>
-
-          <div className="bg-blue-50 p-3 rounded-lg">
-            <p className="text-sm text-blue-800">
-              <strong>Note:</strong> Hospitals will be automatically assigned based on monthly rotation
-            </p>
-          </div>
-
+          {/* Days of week */}
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-2">Days of Week</label>
             <div className="grid grid-cols-7 gap-2">
@@ -199,13 +221,74 @@ const BulkCreateModal = ({ generateBulkSchedules, setShowBulkModal }) => {
             </div>
           </div>
 
-          <div className="flex space-x-3 pt-4">
+          {/* Hospital multi-select */}
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-2">
+              Select Hospitals &amp; Shifts
+              <span className="ml-2 text-xs text-gray-400 font-normal">
+                Each selected hospital creates a separate schedule per day
+              </span>
+            </label>
+
+            {chosenHospitals.length === 0 && (
+              <p className="text-xs text-amber-600 mb-2">Please select at least one hospital.</p>
+            )}
+
+            <div className="border border-gray-200 rounded-lg overflow-hidden">
+              {selectedHospitals.map((h, idx) => (
+                <div
+                  key={h.name}
+                  className={`flex items-center gap-3 px-4 py-3 border-b last:border-b-0 transition-colors ${
+                    h.selected ? 'bg-emerald-50' : 'bg-white hover:bg-gray-50'
+                  }`}
+                >
+                  {/* Checkbox */}
+                  <input
+                    type="checkbox"
+                    checked={h.selected}
+                    onChange={() => toggleHospital(idx)}
+                    className="w-4 h-4 accent-emerald-600 cursor-pointer flex-shrink-0"
+                  />
+
+                  {/* Hospital info */}
+                  <div className="flex-1 min-w-0">
+                    <p className={`text-sm font-semibold truncate ${h.selected ? 'text-emerald-800' : 'text-gray-700'}`}>
+                      {h.name}
+                    </p>
+                    <p className="text-xs text-gray-400 truncate">{h.description} · {h.capacity} slots</p>
+                  </div>
+
+                  {/* Shift selector — only active when selected */}
+                  <select
+                    value={h.shift}
+                    onChange={(e) => setHospitalShift(idx, e.target.value)}
+                    disabled={!h.selected}
+                    className={`text-xs border rounded px-2 py-1.5 flex-shrink-0 ${
+                      h.selected
+                        ? 'border-emerald-300 bg-white text-gray-700'
+                        : 'border-gray-200 bg-gray-100 text-gray-400 cursor-not-allowed'
+                    }`}
+                  >
+                    <option value="08:00-20:00">Day Shift (8AM–8PM)</option>
+                    <option value="18:00-06:00">Night Shift (6PM–6AM)</option>
+                  </select>
+                </div>
+              ))}
+            </div>
+
+            {chosenHospitals.length > 0 && (
+              <p className="text-xs text-emerald-700 mt-2">
+                {chosenHospitals.length} hospital{chosenHospitals.length > 1 ? 's' : ''} selected —
+                each matching day will generate {chosenHospitals.length} schedule{chosenHospitals.length > 1 ? 's' : ''}.
+              </p>
+            )}
+          </div>
+
+          <div className="flex space-x-3 pt-2">
             <button
-              onClick={() => {
-                generateBulkSchedules(bulkData.startDate, bulkData.endDate, bulkData.daysOfWeek);
-                setShowBulkModal(false);
-              }}
-              className="btn-primary flex-1"
+              onClick={handleCreate}
+              disabled={chosenHospitals.length === 0 || !bulkData.startDate || !bulkData.endDate}
+              className="btn-primary flex-1 disabled:opacity-50 disabled:cursor-not-allowed"
             >
               Create Schedules
             </button>
@@ -492,29 +575,43 @@ const ScheduleManagement = () => {
     }
   };
 
-  const generateBulkSchedules = async (startDate, endDate, daysOfWeek = [1, 2, 3, 4, 5]) => {
+  const generateBulkSchedules = async (startDate, endDate, daysOfWeek = [1, 2, 3, 4, 5], selectedHospitals = []) => {
     try {
+      const userId = (await supabase.auth.getUser()).data.user?.id;
       const schedulesToCreate = [];
       const current = new Date(startDate);
       const end = new Date(endDate);
+
       while (current <= end) {
         if (daysOfWeek.includes(current.getDay())) {
-          const assignedHospital = getHospitalForMonth(current);
-          schedulesToCreate.push({
-            date: current.toISOString().split('T')[0],
-            description: 'Community Health Center Duty',
-            location: assignedHospital.name,
-            shift_start: '08:00', shift_end: '20:00',
-            max_students: assignedHospital.capacity, status: 'pending',
-            created_by: (await supabase.auth.getUser()).data.user?.id
-          });
+          const dateStr = current.toISOString().split('T')[0];
+          // Create one schedule entry per selected hospital on this day
+          for (const hospital of selectedHospitals) {
+            const [shiftStart, shiftEnd] = hospital.shift.split('-');
+            schedulesToCreate.push({
+              date: dateStr,
+              description: 'Community Health Center Duty',
+              location: hospital.name,
+              shift_start: shiftStart,
+              shift_end: shiftEnd,
+              max_students: hospital.capacity,
+              status: 'pending',
+              created_by: userId
+            });
+          }
         }
         current.setDate(current.getDate() + 1);
       }
+
+      if (schedulesToCreate.length === 0) {
+        warning('No schedules to create for the selected date range and days.');
+        return;
+      }
+
       const { error: bulkError } = await supabase.from('schedules').insert(schedulesToCreate);
       if (bulkError) throw bulkError;
       await fetchSchedules();
-      success(`Created ${schedulesToCreate.length} schedules successfully`);
+      success(`Created ${schedulesToCreate.length} schedule(s) across ${selectedHospitals.length} hospital(s) successfully`);
     } catch (err) {
       console.error('Error creating bulk schedules:', err);
       error('Failed to create bulk schedules');
@@ -527,7 +624,7 @@ const ScheduleManagement = () => {
     if (filterDate !== 'all') {
       const today = new Date();
       filtered = filtered.filter(b => {
-        const bookingDate = new Date(b.schedules?.date);
+        const bookingDate = new Date(b.schedules?.date + 'T00:00:00');
         if (filterDate === 'today') return bookingDate.toDateString() === today.toDateString();
         if (filterDate === 'week') {
           const weekFromNow = new Date(today); weekFromNow.setDate(weekFromNow.getDate() + 7);
@@ -570,7 +667,7 @@ const ScheduleManagement = () => {
       const weekDays = [];
       for (let day = 0; day < 7; day++) {
         const daySchedule = schedules.find(s =>
-          new Date(s.date).toDateString() === currentDateLoop.toDateString() && s.location === selectedHospital
+          new Date(s.date + 'T00:00:00').toDateString() === currentDateLoop.toDateString() && s.location === selectedHospital
         );
         weekDays.push({
           date: new Date(currentDateLoop), schedule: daySchedule,
@@ -675,7 +772,7 @@ const ScheduleManagement = () => {
                   </div>
                   <div className="flex space-x-2">
                     <button
-                      onClick={() => handleApproveAllBookings(group.scheduleId, new Date(group.scheduleInfo.date).toLocaleDateString(), group.scheduleInfo.location)}
+                      onClick={() => handleApproveAllBookings(group.scheduleId, new Date(group.scheduleInfo.date + 'T00:00:00').toLocaleDateString(), group.scheduleInfo.location)}
                       className="flex items-center space-x-2 bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded-lg transition-colors text-sm"
                     >
                       <CheckCircle className="w-4 h-4" />
@@ -808,7 +905,7 @@ const ScheduleManagement = () => {
                 <p className="text-emerald-100">This Month</p>
                 <p className="text-2xl font-bold">
                   {schedules.filter(s => {
-                    const d = new Date(s.date); const now = new Date();
+                    const d = new Date(s.date + 'T00:00:00'); const now = new Date();
                     return d.getMonth() === now.getMonth() && d.getFullYear() === now.getFullYear();
                   }).length}
                 </p>
@@ -925,6 +1022,7 @@ const ScheduleManagement = () => {
           <BulkCreateModal
             generateBulkSchedules={generateBulkSchedules}
             setShowBulkModal={setShowBulkModal}
+            hospitalLocations={hospitalLocations}
           />
         )}
         {showDeleteConfirm && (

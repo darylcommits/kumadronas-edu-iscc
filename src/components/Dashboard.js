@@ -2289,7 +2289,11 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
                           {/* Booking button for students */}
                           {canBook && (
                             <button
-                              onClick={() => handleBookDuty(day.schedule.id, day.date.toISOString().split('T')[0])}
+                              onClick={() => {
+  const d = day.date;
+  const localDate = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  handleBookDuty(day.schedule.id, localDate);
+}}
                               className="mt-2 w-full text-xs bg-emerald-600 text-white px-2 py-1 rounded hover:bg-emerald-700 transition-colors"
                             >
                               Book Duty
