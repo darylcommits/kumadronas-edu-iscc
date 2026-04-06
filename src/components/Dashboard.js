@@ -49,7 +49,6 @@ import {
   Info,
   BarChart3,
   Trash2,
-  Printer,
   Award,
   Filter,
   AlertTriangle
@@ -1444,78 +1443,6 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
   };
 
 
-  const handlePrintCertificate = (duty) => {
-    const printWindow = window.open('', '_blank');
-    const certificateContent = `
-      <!DOCTYPE html>
-      <html>
-      <head>
-        <title>Duty Completion Certificate</title>
-        <style>
-          body { font-family: Arial, sans-serif; margin: 0; padding: 20px; }
-          .certificate { border: 3px solid #10b981; padding: 30px; text-align: center; max-width: 800px; margin: 0 auto; }
-          .header { color: #10b981; font-size: 28px; font-weight: bold; margin-bottom: 20px; }
-          .subtitle { color: #6b7280; font-size: 18px; margin-bottom: 30px; }
-          .content { margin: 30px 0; }
-          .student-info { background: #f0fdf4; padding: 20px; border-radius: 8px; margin: 20px 0; }
-          .duty-info { background: #f9fafb; padding: 20px; border-radius: 8px; margin: 20px 0; }
-          .signature { margin-top: 50px; display: flex; justify-content: space-between; }
-          .signature-box { width: 200px; border-top: 1px solid #000; text-align: center; padding-top: 10px; }
-          .date { margin-top: 30px; text-align: right; }
-          @media print { body { margin: 0; } .certificate { border: 3px solid #10b981; } }
-        </style>
-      </head>
-      <body>
-        <div class="certificate">
-          <div class="header">DUTY COMPLETION CERTIFICATE</div>
-          <div class="subtitle">Ilocos Sur Community College - Midwifery Program</div>
-          
-          <div class="content">
-            <p>This is to certify that</p>
-            <div class="student-info">
-              <h2 style="color: #10b981; margin: 0;">${user.full_name}</h2>
-              <p style="margin: 5px 0;">Student Number: ${user.student_number || 'N/A'}</p>
-              <p style="margin: 5px 0;">Year Level: ${user.year_level || 'N/A'}</p>
-            </div>
-            
-            <p>has successfully completed their duty assignment on</p>
-            <div class="duty-info">
-              <h3 style="color: #10b981; margin: 0;">${new Date(duty.schedules.date).toLocaleDateString('en-US', {
-      weekday: 'long',
-      year: 'numeric',
-      month: 'long',
-      day: 'numeric'
-    })}</h3>
-              <p style="margin: 5px 0;">Location: ${duty.schedules.location}</p>
-              <p style="margin: 5px 0;">Time: ${duty.schedules.shift_start} - ${duty.schedules.shift_end}</p>
-              <p style="margin: 5px 0;">Description: ${duty.schedules.description}</p>
-            </div>
-            
-            <p>This certificate is issued in recognition of their commitment and dedication to community health service.</p>
-          </div>
-          
-          <div class="signature">
-            <div class="signature-box">
-              <p>Student Signature</p>
-            </div>
-            <div class="signature-box">
-              <p>Supervisor Signature</p>
-            </div>
-          </div>
-          
-          <div class="date">
-            <p>Date Issued: ${new Date().toLocaleDateString()}</p>
-          </div>
-        </div>
-      </body>
-      </html>
-    `;
-
-    printWindow.document.write(certificateContent);
-    printWindow.document.close();
-    printWindow.focus();
-    printWindow.print();
-  };
 
   // Calendar generation function with proper date handling and user-specific filtering
   const generateCalendar = () => {
