@@ -97,6 +97,8 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
   const [approveAllToConfirm, setApproveAllToConfirm] = useState(null); // { scheduleId, studentCount }
   // FIXED: Add state for system logs
   const [systemLogs, setSystemLogs] = useState([]);
+  const [showDutyDetailsModal, setShowDutyDetailsModal] = useState(false);
+  const [selectedDuty, setSelectedDuty] = useState(null);
 
   // Role helper — co-admin has the same access as admin
   const isAdmin = user?.role === 'admin' || user?.role === 'co-admin';
@@ -139,6 +141,7 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
           fetchPendingBookings();
           if (user?.role === 'student') {
             fetchStudentDuties();
+            fetchDashboardStats();
           }
           if (user?.role === 'parent') {
             fetchChildDuties();
@@ -283,7 +286,7 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
         .select('status');
 
       const statusCounts = approvalData?.reduce((acc, curr) => {
-        const s = curr.status || 'pending';
+        const s = curr.status === 'booked' ? 'pending' : (curr.status || 'pending');
         acc[s] = (acc[s] || 0) + 1;
         return acc;
       }, {}) || {};
@@ -531,22 +534,35 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
       } else if (user.role === 'student') {
         const { data: myDuties } = await supabase
           .from('schedule_students')
-          .select('id')
-          .eq('student_id', user.id);
-
-        const { data: upcomingDuties } = await supabase
-          .from('schedule_students')
           .select(`
+            id, 
+            status,
             schedules!inner(date)
           `)
           .eq('student_id', user.id)
-          .eq('status', 'booked')
-          .gte('schedules.date', new Date().toISOString().split('T')[0]);
+          .neq('status', 'cancelled');
+
+        const today = new Date().toISOString().split('T')[0];
+        
+        // Denominator: Completed duties or duties that were supposed to happen (past dates)
+        const eligibleDuties = myDuties?.filter(d => 
+          d.status === 'completed' || d.schedules.date <= today
+        ) || [];
+
+        const completedDuties = eligibleDuties.filter(d => d.status === 'completed');
+        
+        const upcomingDuties = myDuties?.filter(d => 
+          d.status === 'booked' && d.schedules.date > today
+        ) || [];
+
+        const total = eligibleDuties.length;
+        const completed = completedDuties.length;
+        const rate = total > 0 ? Math.round((completed / total) * 100) : 0;
 
         setDashboardStats({
           totalDuties: myDuties?.length || 0,
-          upcomingDuties: upcomingDuties?.length || 0,
-          completionRate: 85
+          upcomingDuties: upcomingDuties.length,
+          completionRate: rate
         });
       }
     } catch (error) {
@@ -1407,7 +1423,7 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
         .from('schedule_students')
         .update({
           status: 'completed',
-          completed_at: new Date().toISOString()
+          updated_at: new Date().toISOString()
         })
         .eq('id', scheduleStudentId)
         .eq('student_id', user.id);
@@ -1417,7 +1433,8 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
       await Promise.all([
         fetchSchedules(),
         fetchStudentDuties(),
-        fetchPendingBookings()
+        fetchPendingBookings(),
+        fetchDashboardStats()
       ]);
       success('Duty marked as completed! You can now print your completion certificate.');
     } catch (error) {
@@ -2039,6 +2056,40 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
     </div>
   );
 
+  // Helper to check if a duty shift has ended
+  const isDutyOver = (schedule) => {
+    if (!schedule) return false;
+
+    try {
+      const now = new Date();
+      const dutyDateStr = schedule.date; // "YYYY-MM-DD"
+      const shiftEnd = schedule.shift_end; // "HH:mm"
+      const shiftStart = schedule.shift_start; // "HH:mm"
+
+      // Parse duty date
+      const [year, month, day] = dutyDateStr.split('-').map(Number);
+      const [endHour, endMinute] = shiftEnd.split(':').map(Number);
+      const [startHour, startMinute] = shiftStart.split(':').map(Number);
+
+      // Create end time date object
+      let dutyEndDate = new Date(year, month - 1, day, endHour, endMinute);
+
+      // Handle night shifts (ending next day)
+      const startMinutes = startHour * 60 + startMinute;
+      const endMinutes = endHour * 60 + endMinute;
+
+      if (endMinutes < startMinutes) {
+        // Shift ends on the next day
+        dutyEndDate.setDate(dutyEndDate.getDate() + 1);
+      }
+
+      return now > dutyEndDate;
+    } catch (err) {
+      console.error('Error calculating if duty is over:', err);
+      return false;
+    }
+  };
+
   // FIXED: Enhanced Calendar View Component with proper individual booking approval status
   const renderCalendarView = () => (
     <div className="space-y-6">
@@ -2133,8 +2184,9 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
                   const isFull = studentCount >= maxStudents;
                   const myBooking = activeStudents.find(s => s.student_id === user.id);
                   const isBooked = !!myBooking;
-                  // FIXED: Check individual booking status, not schedule status
-                  const isApproved = myBooking?.status === 'approved';
+                  // FIXED: Check individual booking status - completion implies approval
+                  const isApproved = myBooking?.status === 'approved' || myBooking?.status === 'completed';
+                  const isCompleted = myBooking?.status === 'completed';
                   const hasSameDayCancellation = user?.role === 'student' && checkSameDayCancellation(day.date.toISOString().split('T')[0]);
 
                   // FIXED: Role-specific booking logic
@@ -2180,14 +2232,15 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
                             ) : user?.role === 'student' ? (
                               // Student view: Booking-focused info with FIXED individual approval status
                               <>
-                                <span className={`px-2 py-1 rounded-full text-xs font-medium ${isFull ? 'bg-red-100 text-red-800' :
+                                <span className={`px-2 py-1 rounded-full text-xs font-medium ${isCompleted ? 'bg-blue-100 text-blue-800' :
                                   isBooked ? 'bg-blue-100 text-blue-800' :
-                                    'bg-green-100 text-green-800'
+                                    isFull ? 'bg-red-100 text-red-800' :
+                                      'bg-green-100 text-green-800'
                                   }`}>
-                                  {isFull ? 'FULL' : isBooked ? 'BOOKED' : `${maxStudents - studentCount} LEFT`}
+                                  {isCompleted ? 'COMPLETED' : isBooked ? 'BOOKED' : isFull ? 'FULL' : `${maxStudents - studentCount} LEFT`}
                                 </span>
-                                {/* FIXED: Show individual booking approval status */}
-                                {isBooked && (
+                                {/* FIXED: Show individual booking approval status, hide if completed (redundant) */}
+                                {isBooked && !isCompleted && (
                                   <span className={`px-2 py-1 rounded-full text-xs font-medium ${isApproved ? 'bg-green-100 text-green-800' : 'bg-yellow-100 text-yellow-800'
                                     }`}>
                                     {isApproved ? 'APPROVED' : 'PENDING'}
@@ -2199,13 +2252,13 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
                               <>
                                 {isBooked ? (
                                   <>
-                                    <span className={`px-2 py-1 rounded-full text-xs font-medium ${myBooking?.status === 'approved' ? 'bg-green-100 text-green-800' :
-                                      myBooking?.status === 'completed' ? 'bg-blue-100 text-blue-800' :
+                                    <span className={`px-2 py-1 rounded-full text-xs font-medium ${isCompleted ? 'bg-blue-100 text-blue-800' :
+                                      isApproved ? 'bg-green-100 text-green-800' :
                                         myBooking?.status === 'cancelled' ? 'bg-red-100 text-red-800' :
                                           'bg-yellow-100 text-yellow-800'
                                       }`}>
-                                      {myBooking?.status === 'approved' ? 'APPROVED' :
-                                        myBooking?.status === 'completed' ? 'COMPLETED' :
+                                      {isCompleted ? 'COMPLETED' :
+                                        isApproved ? 'APPROVED' :
                                           myBooking?.status === 'cancelled' ? 'CANCELLED' :
                                             'PENDING'}
                                     </span>
@@ -2321,11 +2374,29 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
                         </div>
                       )}
 
-                      {/* FIXED: Show proper approval status for students */}
+                      {/* FIXED: Show proper approval status and Complete button for students */}
                       {isBooked && day.schedule && user?.role === 'student' && (
-                        <div className={`mt-2 text-xs font-medium text-center ${isApproved ? 'text-green-600' : 'text-yellow-600'
-                          }`}>
-                          {isApproved ? 'Your Duty Approved ✓' : 'Awaiting Admin Approval'}
+                        <div className="mt-2 space-y-2">
+                          <div className={`text-xs font-medium text-center ${myBooking.status === 'completed' ? 'text-blue-600' :
+                            isApproved ? 'text-green-600' : 'text-yellow-600'
+                            }`}>
+                            {myBooking.status === 'completed' ? 'Duty Completed ✓' :
+                              isApproved ? 'Your Duty Approved ✓' : 'Awaiting Admin Approval'}
+                          </div>
+
+                          {/* Complete button inside calendar */}
+                          {isApproved && myBooking.status !== 'completed' && isDutyOver(day.schedule) && (
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleCompleteDuty(myBooking.id);
+                              }}
+                              className="w-full flex items-center justify-center space-x-1 bg-emerald-600 hover:bg-emerald-700 text-white text-[10px] sm:text-xs py-1 rounded transition-colors shadow-sm"
+                            >
+                              <Award className="w-3 h-3" />
+                              <span>Complete</span>
+                            </button>
+                          )}
                         </div>
                       )}
 
@@ -2506,15 +2577,18 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
                   </button>
                 )}
 
-                {/* Print certificate button for completed duties */}
+                {/* View details button for completed duties */}
                 {duty.status === 'completed' && (
                   <button
-                    onClick={() => handlePrintCertificate(duty)}
+                    onClick={() => {
+                      setSelectedDuty(duty);
+                      setShowDutyDetailsModal(true);
+                    }}
                     className="flex items-center space-x-1 text-blue-600 hover:text-blue-700 text-sm px-3 py-1 rounded-lg hover:bg-blue-50 transition-colors"
-                    title="Print completion certificate"
+                    title="View duty details"
                   >
-                    <Printer className="w-4 h-4" />
-                    <span>Print Certificate</span>
+                    <Info className="w-4 h-4" />
+                    <span>View Details</span>
                   </button>
                 )}
 
@@ -2549,6 +2623,134 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
       </div>
     </div>
   );
+
+  const renderDutyDetailsModal = () => {
+    if (!selectedDuty) return null;
+    const { schedules } = selectedDuty;
+
+    return (
+      <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-[100] flex items-center justify-center p-4 transition-all duration-300">
+        <div 
+          className="bg-white rounded-3xl shadow-2xl w-full max-w-lg overflow-hidden transform transition-all animate-in fade-in zoom-in duration-300"
+          onClick={(e) => e.stopPropagation()}
+        >
+          {/* Header */}
+          <div className="bg-gradient-to-r from-emerald-600 to-green-600 px-6 py-5 flex justify-between items-center text-white">
+            <div className="flex items-center space-x-3">
+              <div className="p-2 bg-white/20 rounded-lg">
+                <Info className="w-5 h-5 text-white" />
+              </div>
+              <div>
+                <h3 className="text-xl font-bold">Duty Details</h3>
+                <p className="text-emerald-50 text-xs font-medium uppercase tracking-wider">Reference #{selectedDuty.id.slice(0, 8)}</p>
+              </div>
+            </div>
+            <button 
+              onClick={() => setShowDutyDetailsModal(false)}
+              className="hover:bg-white/20 p-2 rounded-full transition-colors"
+            >
+              <X className="w-6 h-6" />
+            </button>
+          </div>
+          
+          {/* Content */}
+          <div className="p-8 space-y-8">
+            {/* Status & Date Row */}
+            <div className="flex justify-between items-start">
+              <div className="space-y-1">
+                <p className="text-[10px] font-bold text-gray-400 uppercase tracking-[0.1em]">Duty Date</p>
+                <p className="text-gray-900 font-bold text-lg">
+                  {new Date(schedules.date).toLocaleDateString('en-US', { 
+                    weekday: 'long', 
+                    year: 'numeric', 
+                    month: 'long', 
+                    day: 'numeric' 
+                  })}
+                </p>
+              </div>
+              <div className="text-right">
+                <p className="text-[10px] font-bold text-gray-400 uppercase tracking-[0.1em] mb-1.5">Current Status</p>
+                <span className={`inline-flex px-3 py-1 rounded-full text-xs font-bold ${
+                  selectedDuty.status === 'completed' ? 'bg-blue-100 text-blue-800' : 
+                  'bg-green-100 text-green-800'
+                }`}>
+                  {selectedDuty.status.toUpperCase()}
+                </span>
+              </div>
+            </div>
+
+            {/* Location Section */}
+            <div className="bg-gray-50 rounded-2xl p-5 border border-gray-100">
+              <p className="text-[10px] font-bold text-gray-400 uppercase tracking-[0.1em] mb-3">Assigned Hospital / Location</p>
+              <div className="flex items-center text-gray-900">
+                <div className="w-10 h-10 bg-white rounded-xl shadow-sm flex items-center justify-center mr-4 border border-emerald-50">
+                  <Shield className="w-5 h-5 text-emerald-600" />
+                </div>
+                <div>
+                  <p className="font-bold text-gray-900">{schedules.location || 'N/A'}</p>
+                  <p className="text-xs text-gray-500">Public Health Facility</p>
+                </div>
+              </div>
+            </div>
+
+            {/* Shifts Section */}
+            <div className="grid grid-cols-2 gap-6">
+              <div className="space-y-2">
+                <p className="text-[10px] font-bold text-gray-400 uppercase tracking-[0.1em]">Shift Start</p>
+                <div className="flex items-center text-gray-900 bg-gray-50 p-3 rounded-xl border border-gray-100">
+                  <Clock className="w-4 h-4 text-emerald-600 mr-2.5" />
+                  <span className="font-bold text-sm">{schedules.shift_start}</span>
+                </div>
+              </div>
+              <div className="space-y-2">
+                <p className="text-[10px] font-bold text-gray-400 uppercase tracking-[0.1em]">Shift End</p>
+                <div className="flex items-center text-gray-900 bg-gray-50 p-3 rounded-xl border border-gray-100">
+                  <Clock className="w-4 h-4 text-emerald-600 mr-2.5" />
+                  <span className="font-bold text-sm">{schedules.shift_end}</span>
+                </div>
+              </div>
+            </div>
+
+            {/* Description Section */}
+            {schedules.description && (
+              <div className="space-y-2">
+                <p className="text-[10px] font-bold text-gray-400 uppercase tracking-[0.1em]">Notes & Instructions</p>
+                <div className="text-sm text-gray-600 bg-emerald-50/50 p-5 rounded-2xl border border-emerald-100 italic leading-relaxed">
+                  "{schedules.description}"
+                </div>
+              </div>
+            )}
+
+            {/* Metadata Footer */}
+            <div className="pt-6 border-t border-gray-100">
+              <div className="flex justify-between items-center text-[10px] font-medium text-gray-400 uppercase tracking-wider">
+                <span className="flex items-center">
+                  <CalendarIcon className="w-3 h-3 mr-1.5" />
+                  Booked: {new Date(selectedDuty.booking_time).toLocaleString()}
+                </span>
+                {selectedDuty.status === 'completed' && (
+                  <span className="text-emerald-600 flex items-center font-bold">
+                    <CheckCircle className="w-3 h-3 mr-1" />
+                    Verified Completion
+                  </span>
+                )}
+              </div>
+            </div>
+          </div>
+
+          {/* Footer Actions */}
+          <div className="bg-gray-50 px-8 py-5 flex justify-end">
+            <button
+              onClick={() => setShowDutyDetailsModal(false)}
+              className="px-8 py-2.5 bg-white border border-gray-200 text-gray-700 rounded-xl font-bold text-sm hover:bg-gray-100 transition-all shadow-sm active:scale-95"
+            >
+              Dismiss
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  };
 
   // Notifications View Component
   const renderNotificationsView = () => (
@@ -3255,6 +3457,9 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
           </div>
         </div>
       )}
+
+      {/* Duty Details Modal */}
+      {showDutyDetailsModal && renderDutyDetailsModal()}
     </div>
   );
 };
