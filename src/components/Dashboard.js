@@ -760,18 +760,18 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
           .select('id, full_name')
           .eq('role', 'admin');
 
+        const dateStr = new Date(date + 'T00:00:00').toLocaleDateString('en-US', {
+          year: 'numeric',
+          month: 'long',
+          day: 'numeric'
+        });
+
         if (adminError) {
           console.error('Error fetching admins:', adminError);
         } else if (admins && admins.length > 0) {
           console.log(`Found ${admins.length} admin(s), creating notifications...`);
 
-          const dateStr = new Date(date + 'T00:00:00').toLocaleDateString('en-US', {
-            year: 'numeric',
-            month: 'long',
-            day: 'numeric'
-          });
-
-          const notifications = admins.map(admin => ({
+          const adminNotifications = admins.map(admin => ({
             user_id: admin.id,
             title: 'New Duty Booking',
             message: `${user.full_name} has booked duty for ${dateStr} at ${schedule.location}`,
@@ -781,15 +781,45 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
 
           const { error: notifError } = await supabase
             .from('notifications')
-            .insert(notifications);
+            .insert(adminNotifications);
 
           if (notifError) {
             console.error('Error creating admin notifications:', notifError);
           } else {
-            console.log(`Successfully created ${notifications.length} admin notification(s)`);
+            console.log(`Successfully created ${adminNotifications.length} admin notification(s)`);
           }
-        } else {
-          console.log('No admins found in database');
+        }
+
+        // FIXED: Send notifications to linked PARENTS
+        console.log('Sending notifications to parents...');
+        const { data: parents, error: parentError } = await supabase
+          .from('profiles')
+          .select('id')
+          .eq('role', 'parent')
+          .eq('student_id', user.id);
+
+        if (parentError) {
+          console.error('Error fetching parents:', parentError);
+        } else if (parents && parents.length > 0) {
+          console.log(`Found ${parents.length} parent(s), creating notifications...`);
+
+          const parentNotifications = parents.map(parent => ({
+            user_id: parent.id,
+            title: 'Child Duty Booked',
+            message: `Your child ${user.full_name} has booked duty for ${dateStr} at ${schedule.location}`,
+            type: 'info',
+            read: false
+          }));
+
+          const { error: pNotifError } = await supabase
+            .from('notifications')
+            .insert(parentNotifications);
+
+          if (pNotifError) {
+            console.error('Error creating parent notifications:', pNotifError);
+          } else {
+            console.log(`Successfully created ${parentNotifications.length} parent notification(s)`);
+          }
         }
       } catch (notifErr) {
         console.error('Error in notification process:', notifErr);
@@ -1428,6 +1458,46 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
         .eq('student_id', user.id);
 
       if (error) throw error;
+
+      // FIXED: Notify linked PARENTS about completion
+      try {
+        const { data: bookingDetails } = await supabase
+          .from('schedule_students')
+          .select(`
+            schedules (date, location)
+          `)
+          .eq('id', scheduleStudentId)
+          .single();
+
+        if (bookingDetails?.schedules) {
+          const { data: parents } = await supabase
+            .from('profiles')
+            .select('id')
+            .eq('role', 'parent')
+            .eq('student_id', user.id);
+
+          if (parents && parents.length > 0) {
+            const dateStr = new Date(bookingDetails.schedules.date + 'T00:00:00').toLocaleDateString('en-US', {
+              year: 'numeric',
+              month: 'long',
+              day: 'numeric'
+            });
+
+            const parentNotifications = parents.map(parent => ({
+              user_id: parent.id,
+              title: 'Child Duty Completed ✓',
+              message: `Your child ${user.full_name} has completed duty for ${dateStr} at ${bookingDetails.schedules.location}`,
+              type: 'success',
+              read: false
+            }));
+
+            await supabase.from('notifications').insert(parentNotifications);
+            console.log(`Sent completion notifications to ${parentNotifications.length} parent(s)`);
+          }
+        }
+      } catch (notifErr) {
+        console.warn('Failed to send completion notifications:', notifErr);
+      }
 
       await Promise.all([
         fetchSchedules(),

@@ -194,27 +194,50 @@ export const dbHelpers = {
         console.warn('Failed to create audit log:', logError);
       }
 
-      // Create notification for admins
+      // Create notification for admins and parents
       try {
         const { data: admins } = await supabase
           .from('profiles')
           .select('id')
           .eq('role', 'admin');
 
+        const { data: parents } = await supabase
+          .from('profiles')
+          .select('id')
+          .eq('role', 'parent')
+          .eq('student_id', studentId);
+
+        const dateStr = new Date(info.schedule_date + 'T00:00:00').toLocaleDateString('en-US', {
+          year: 'numeric',
+          month: 'long',
+          day: 'numeric'
+        });
+
+        const notifications = [];
+
         if (admins && admins.length > 0) {
-          const dateStr = new Date(info.schedule_date + 'T00:00:00').toLocaleDateString('en-US', {
-            year: 'numeric',
-            month: 'long',
-            day: 'numeric'
+          admins.forEach(admin => {
+            notifications.push({
+              user_id: admin.id,
+              title: 'New Duty Booking',
+              message: `A student has booked duty for ${dateStr}`,
+              type: 'info'
+            });
           });
+        }
 
-          const notifications = admins.map(admin => ({
-            user_id: admin.id,
-            title: 'New Duty Booking',
-            message: `A student has booked duty for ${dateStr}`,
-            type: 'info'
-          }));
+        if (parents && parents.length > 0) {
+          parents.forEach(parent => {
+            notifications.push({
+              user_id: parent.id,
+              title: 'Child Duty Booked',
+              message: `Your child has booked duty for ${dateStr}`,
+              type: 'info'
+            });
+          });
+        }
 
+        if (notifications.length > 0) {
           await supabase.from('notifications').insert(notifications);
         }
       } catch (notificationError) {
