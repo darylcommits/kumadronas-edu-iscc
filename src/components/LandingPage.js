@@ -23,7 +23,7 @@ const LandingPage = ({ onGetStarted }) => {
 
         {/* Title */}
         <h1 className="landing-title text-6xl md:text-8xl font-extrabold text-white mb-3 tracking-tight">
-          Kumadronas System
+          Kumadronas Clinical On-call <br />Duty System
         </h1>
         <p className="landing-subtitle text-white/90 text-2xl md:text-3xl font-semibold mb-2">
           Ilocos Sur Community College

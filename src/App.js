@@ -44,7 +44,7 @@ function App() {
           return;
         }
 
-        console.log('Profile loaded:', data.full_name, data.role);
+        console.log('Profile loaded:', data.last_name + ', ' + data.first_name, data.role);
         setUser(data);
 
         // Update last login (non-blocking)
@@ -78,68 +78,115 @@ function App() {
       let { data: pendingReg } = await supabase
         .from('pending_registrations')
         .select('*')
-        .eq('email', authUser.email)
+        .ilike('email', authUser.email)
         .eq('status', 'approved')
         .maybeSingle();
 
-      // Fallback: search without status filter (handles race conditions / edge cases)
+      // Fallback: search without status filter
       if (!pendingReg) {
         const { data: anyReg } = await supabase
           .from('pending_registrations')
           .select('*')
-          .eq('email', authUser.email)
+          .ilike('email', authUser.email)
           .order('created_at', { ascending: false })
           .maybeSingle();
         if (anyReg) pendingReg = anyReg;
       }
 
+      const role = pendingReg?.role || metadata.role || 'student';
+      let studentNumber = pendingReg?.student_number || metadata.student_number || null;
+      let requestedChildren = [];
+
+      // If it's a parent, student_number might be a JSON string of multiple student numbers
+      if (role === 'parent' && studentNumber) {
+        try {
+          const parsed = JSON.parse(studentNumber);
+          if (Array.isArray(parsed)) {
+            requestedChildren = parsed;
+            studentNumber = null; // Parents don't have a student number themselves
+          }
+        } catch (e) {
+          // If not JSON, it might be a single student number from old flow
+          if (studentNumber && studentNumber.includes('C-')) {
+             requestedChildren = [studentNumber];
+             studentNumber = null;
+          }
+        }
+      }
+
       const profileData = {
         id: userId,
-        email: authUser.email,
-        full_name: pendingReg?.full_name || metadata.full_name || authUser.email.split('@')[0],
-        role: pendingReg?.role || metadata.role || 'student',
-        phone_number: pendingReg?.phone_number || metadata.phone_number || null,
-        student_number: pendingReg?.student_number || metadata.student_number || null,
-        year_level: pendingReg?.year_level || metadata.year_level || null,
+        email: authUser.email.trim().toLowerCase(),
+        first_name:      pendingReg?.first_name      || metadata.first_name      || authUser.email.split('@')[0],
+        last_name:       pendingReg?.last_name       || metadata.last_name       || '',
+        middle_initial:  pendingReg?.middle_initial  || metadata.middle_initial  || null,
+        role:            role,
+        phone_number:    pendingReg?.phone_number    || metadata.phone_number    || null,
+        student_number:  studentNumber,
+        year_level:      pendingReg?.year_level      || metadata.year_level      || null,
         is_active: true,
         approval_status: 'approved'
       };
 
-      const { data, error } = await supabase
+      // Use upsert so it works whether the profile exists or not
+      // Always enforce is_active:true and approval_status:'approved' on login
+      const { data: profile, error } = await supabase
         .from('profiles')
-        .insert([profileData])
+        .upsert(profileData, { onConflict: 'id' })
         .select()
         .single();
 
       if (error) {
-        if (error.code === '23505') {
-          const { data: existingProfile } = await supabase
-            .from('profiles')
-            .select('*')
-            .eq('id', userId)
-            .maybeSingle();
-
-          if (existingProfile) {
-            setUser(existingProfile);
-            return;
-          }
+        console.error('Error upserting profile:', error);
+        // Last resort: just fetch whatever exists
+        const { data: existingProfile } = await supabase
+          .from('profiles')
+          .select('*')
+          .eq('id', userId)
+          .maybeSingle();
+        if (existingProfile) {
+          // Force approve even if we can't write
+          setUser({ ...existingProfile, is_active: true, approval_status: 'approved' });
         }
-        console.error('Error creating profile:', error);
         return;
       }
 
-      console.log('Profile created successfully:', data.full_name);
-      setUser(data);
+      console.log('Profile created successfully:', (profile.first_name || '') + ' ' + (profile.last_name || ''));
+      setUser(profile);
+
+      // Automatically establish links for parents
+      if (role === 'parent' && requestedChildren.length > 0) {
+        console.log('Establishing initial child links for parent:', requestedChildren);
+        for (const num of requestedChildren) {
+          try {
+            const { data: student } = await supabase
+              .from('profiles')
+              .select('id')
+              .eq('student_number', num)
+              .maybeSingle();
+            
+            if (student) {
+              await supabase.from('parent_student_links').upsert({
+                parent_id: userId,
+                student_id: student.id,
+                status: 'approved'
+              }, { onConflict: 'parent_id,student_id' });
+            }
+          } catch (linkErr) {
+            console.warn('Failed to link child during profile creation:', num, linkErr);
+          }
+        }
+      }
 
       supabase.from('notifications').insert({
-        user_id: data.id,
+        user_id: profile.id,
         title: 'Welcome to Comadronas System!',
-        message: `Welcome ${data.full_name}! Your account has been created successfully.`,
+        message: `Welcome ${profile.first_name}! Your account has been created successfully.`,
         type: 'success'
       }).catch(err => console.warn('Failed to send welcome notification:', err));
 
     } catch (error) {
-      console.error('Error creating profile:', error);
+      console.error('Error contributing to profile creation:', error);
     }
   };
 
@@ -223,7 +270,7 @@ function App() {
   }, [fetchUserProfile]);
 
   const handleProfileUpdate = useCallback((updatedUser) => {
-    console.log('Profile updated:', updatedUser.full_name);
+    console.log('Profile updated:', updatedUser.first_name + ' ' + updatedUser.last_name);
     setUser(updatedUser);
   }, []);
 

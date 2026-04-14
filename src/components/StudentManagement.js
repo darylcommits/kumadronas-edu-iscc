@@ -1,4 +1,3 @@
-// StudentManagement.js - Updated with beautiful toast notifications
 import React, { useState, useEffect } from 'react';
 import { supabase } from '../lib/supabase';
 import {
@@ -17,6 +16,94 @@ import {
   X as CloseIcon
 } from 'lucide-react';
 import { useToast, ToastContainer } from './Toast';
+
+// No more parseName helper needed as names are atomic in the DB
+
+// View Student Modal
+const ViewStudentModal = ({ student, onClose }) => {
+  const { first_name: firstName, last_name: lastName, middle_initial: middleInitial } = student;
+  const totalDuties = student.schedule_students?.length || 0;
+  const completedDuties = student.schedule_students?.filter(s => s.status === 'completed').length || 0;
+  const rate = totalDuties > 0 ? Math.round((completedDuties / totalDuties) * 100) : 0;
+
+  return (
+    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+      <div className="bg-white rounded-xl p-6 w-full max-w-md mx-4 shadow-2xl">
+        <div className="flex justify-between items-center mb-5">
+          <h3 className="text-lg font-bold text-gray-900">Student Profile</h3>
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-600 p-1 rounded-lg hover:bg-gray-100">
+            <CloseIcon className="w-5 h-5" />
+          </button>
+        </div>
+
+        <div className="flex items-center space-x-4 mb-5">
+          <div className="w-16 h-16 bg-gradient-to-r from-emerald-500 to-green-500 rounded-full flex items-center justify-center flex-shrink-0">
+            <span className="text-white text-xl font-bold">
+              {(firstName?.[0] || '') + (lastName?.[0] || '')}
+            </span>
+          </div>
+          <div>
+            <p className="text-xs text-emerald-600 font-semibold uppercase tracking-wide">Student</p>
+            <p className="text-lg font-bold text-gray-900">{firstName} {lastName}</p>
+            <p className="text-sm text-gray-500">{student.email}</p>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-2 gap-3 mb-4">
+          <div className="bg-gray-50 rounded-lg p-3">
+            <p className="text-xs text-gray-500 mb-0.5">First Name</p>
+            <p className="font-semibold text-gray-900 text-sm">{firstName || '—'}</p>
+          </div>
+          <div className="bg-gray-50 rounded-lg p-3">
+            <p className="text-xs text-gray-500 mb-0.5">Last Name</p>
+            <p className="font-semibold text-gray-900 text-sm">{lastName || '—'}</p>
+          </div>
+          <div className="bg-gray-50 rounded-lg p-3">
+            <p className="text-xs text-gray-500 mb-0.5">Middle Initial</p>
+            <p className="font-semibold text-gray-900 text-sm">{middleInitial || '—'}</p>
+          </div>
+          <div className="bg-gray-50 rounded-lg p-3">
+            <p className="text-xs text-gray-500 mb-0.5">Student No.</p>
+            <p className="font-semibold text-gray-900 text-sm">{student.student_number || '—'}</p>
+          </div>
+          <div className="bg-gray-50 rounded-lg p-3">
+            <p className="text-xs text-gray-500 mb-0.5">Year Level</p>
+            <p className="font-semibold text-gray-900 text-sm">{student.year_level || '—'}</p>
+          </div>
+          <div className="bg-gray-50 rounded-lg p-3">
+            <p className="text-xs text-gray-500 mb-0.5">Phone</p>
+            <p className="font-semibold text-gray-900 text-sm">{student.phone_number || '—'}</p>
+          </div>
+        </div>
+
+        <div className="flex gap-3 mb-4">
+          <div className="flex-1 bg-emerald-50 rounded-lg p-3 text-center">
+            <p className="text-2xl font-bold text-emerald-700">{completedDuties}</p>
+            <p className="text-xs text-emerald-600">Completed</p>
+          </div>
+          <div className="flex-1 bg-blue-50 rounded-lg p-3 text-center">
+            <p className="text-2xl font-bold text-blue-700">{totalDuties}</p>
+            <p className="text-xs text-blue-600">Total Duties</p>
+          </div>
+          <div className="flex-1 bg-purple-50 rounded-lg p-3 text-center">
+            <p className="text-2xl font-bold text-purple-700">{rate}%</p>
+            <p className="text-xs text-purple-600">Success Rate</p>
+          </div>
+        </div>
+
+        <div className="flex items-center justify-between">
+          <span className={`inline-flex items-center space-x-1 px-3 py-1 rounded-full text-sm font-semibold ${
+            student.is_active ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'
+          }`}>
+            {student.is_active ? <CheckCircle className="w-4 h-4" /> : <XCircle className="w-4 h-4" />}
+            <span>{student.is_active ? 'Active' : 'Inactive'}</span>
+          </span>
+          <button onClick={onClose} className="px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition-colors text-sm font-medium">Close</button>
+        </div>
+      </div>
+    </div>
+  );
+};
 
 /* ── Sub-components defined OUTSIDE to prevent remount on parent re-render ── */
 
@@ -61,15 +148,37 @@ const EditStudentModal = ({
         </button>
       </div>
       <form onSubmit={handleSaveEdit} className="space-y-4">
-        <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">Full Name</label>
-          <input
-            type="text"
-            value={editFormData.full_name}
-            onChange={(e) => setEditFormData({ ...editFormData, full_name: e.target.value })}
-            className="input-field"
-            required
-          />
+        <div className="grid grid-cols-5 gap-3">
+          <div className="col-span-2">
+            <label className="block text-sm font-medium text-gray-700 mb-1">First Name</label>
+            <input
+              type="text"
+              value={editFormData.first_name}
+              onChange={(e) => setEditFormData({ ...editFormData, first_name: e.target.value })}
+              className="input-field"
+              required
+            />
+          </div>
+          <div className="col-span-2">
+            <label className="block text-sm font-medium text-gray-700 mb-1">Last Name</label>
+            <input
+              type="text"
+              value={editFormData.last_name}
+              onChange={(e) => setEditFormData({ ...editFormData, last_name: e.target.value })}
+              className="input-field"
+              required
+            />
+          </div>
+          <div className="col-span-1">
+            <label className="block text-sm font-medium text-gray-700 mb-1">M.I.</label>
+            <input
+              type="text"
+              value={editFormData.middle_initial}
+              onChange={(e) => setEditFormData({ ...editFormData, middle_initial: e.target.value })}
+              className="input-field text-center"
+              maxLength={2}
+            />
+          </div>
         </div>
         <div>
           <label className="block text-sm font-medium text-gray-700 mb-1">Email (Read-only)</label>
@@ -129,7 +238,13 @@ const EditStudentModal = ({
 
 const CoAdminModal = ({ handleCreateCoAdmin, setShowCoAdminModal, warning }) => {
   const [coAdminData, setCoAdminData] = useState({
-    full_name: '', email: '', phone_number: '', password: '', confirm_password: ''
+    first_name: '',
+    last_name: '',
+    middle_initial: '',
+    email: '',
+    phone_number: '',
+    password: '',
+    confirm_password: ''
   });
   const [showPasswords, setShowPasswords] = useState({ password: false, confirm_password: false });
 
@@ -147,11 +262,29 @@ const CoAdminModal = ({ handleCreateCoAdmin, setShowCoAdminModal, warning }) => 
       <div className="bg-white rounded-lg p-6 w-full max-w-md mx-4">
         <h3 className="text-lg font-semibold mb-4">Create Co-Admin Account</h3>
         <form onSubmit={handleSubmit} className="space-y-4">
-          <input
-            type="text" placeholder="Full Name" value={coAdminData.full_name}
-            onChange={(e) => setCoAdminData({ ...coAdminData, full_name: e.target.value })}
-            className="input-field" required
-          />
+          <div className="grid grid-cols-5 gap-3">
+            <div className="col-span-2">
+              <input
+                type="text" placeholder="First Name" value={coAdminData.first_name}
+                onChange={(e) => setCoAdminData({ ...coAdminData, first_name: e.target.value })}
+                className="input-field" required
+              />
+            </div>
+            <div className="col-span-2">
+              <input
+                type="text" placeholder="Last Name" value={coAdminData.last_name}
+                onChange={(e) => setCoAdminData({ ...coAdminData, last_name: e.target.value })}
+                className="input-field" required
+              />
+            </div>
+            <div className="col-span-1">
+              <input
+                type="text" placeholder="M.I." value={coAdminData.middle_initial}
+                onChange={(e) => setCoAdminData({ ...coAdminData, middle_initial: e.target.value })}
+                className="input-field text-center" maxLength={2}
+              />
+            </div>
+          </div>
           <input
             type="email" placeholder="Email" value={coAdminData.email}
             onChange={(e) => setCoAdminData({ ...coAdminData, email: e.target.value })}
@@ -200,9 +333,10 @@ const CoAdminModal = ({ handleCreateCoAdmin, setShowCoAdminModal, warning }) => 
   );
 };
 
-const StudentCard = ({ student, handleEditStudent, handleDeleteStudent, toggleStudentStatus }) => {
+const StudentCard = ({ student, handleEditStudent, handleDeleteStudent, toggleStudentStatus, onView }) => {
   const totalDuties = student.schedule_students?.length || 0;
   const completedDuties = student.schedule_students?.filter(s => s.status === 'completed').length || 0;
+  const { first_name: firstName, last_name: lastName, middle_initial: middleInitial } = student;
 
   return (
     <div className="card hover:shadow-lg transition-shadow">
@@ -210,12 +344,14 @@ const StudentCard = ({ student, handleEditStudent, handleDeleteStudent, toggleSt
         <div className="flex items-start space-x-4">
           <div className="w-12 h-12 bg-gradient-to-r from-emerald-500 to-green-500 rounded-full flex items-center justify-center">
             <span className="text-white font-medium">
-              {student.full_name?.split(' ').map(n => n[0]).join('').substring(0, 2)}
+              {(firstName?.[0] || '') + (lastName?.[0] || '')}
             </span>
           </div>
           <div className="flex-1">
             <div className="flex items-center space-x-2">
-              <h3 className="font-semibold text-gray-900">{student.full_name}</h3>
+              <h3 className="font-semibold text-gray-900">
+                {lastName}, {firstName} {middleInitial || ''}
+              </h3>
               {student.is_active ? <CheckCircle className="w-4 h-4 text-green-500" /> : <XCircle className="w-4 h-4 text-red-500" />}
             </div>
             <div className="mt-1 space-y-1 text-sm text-gray-600">
@@ -239,6 +375,9 @@ const StudentCard = ({ student, handleEditStudent, handleDeleteStudent, toggleSt
           </div>
         </div>
         <div className="flex items-center space-x-2">
+          <button onClick={() => onView(student)} className="p-2 text-emerald-600 hover:text-emerald-800 rounded-lg hover:bg-emerald-50" title="View student details">
+            <Eye className="w-4 h-4" />
+          </button>
           <button onClick={() => handleEditStudent(student)} className="p-2 text-gray-500 hover:text-gray-700 rounded-lg hover:bg-gray-100" title="Edit student information">
             <Edit className="w-4 h-4" />
           </button>
@@ -272,6 +411,7 @@ const StudentManagement = () => {
   const [showEditModal, setShowEditModal] = useState(false);
   const [showCoAdminModal, setShowCoAdminModal] = useState(false);
   const [editFormData, setEditFormData] = useState({});
+  const [viewStudent, setViewStudent] = useState(null);
 
   const { toasts, removeToast, success, error, warning } = useToast();
 
@@ -281,7 +421,18 @@ const StudentManagement = () => {
     try {
       setLoading(true);
       const { data: profilesData, error: profilesError } = await supabase
-        .from('profiles').select('*').eq('role', 'student').order('full_name');
+        .from('profiles')
+        .select('*')
+        .eq('role', 'student');
+      
+      // Manual sort since atomic columns might be missing
+      if (profilesData) {
+        profilesData.sort((a, b) => {
+          const nameA = (a.last_name || a.full_name || '').toLowerCase();
+          const nameB = (b.last_name || b.full_name || '').toLowerCase();
+          return nameA.localeCompare(nameB);
+        });
+      }
       if (profilesError) throw profilesError;
 
       const { data: scheduleData } = await supabase
@@ -302,8 +453,12 @@ const StudentManagement = () => {
   };
 
   const filteredStudents = students.filter(student => {
+    const firstName = student.first_name || student.full_name?.split(' ')[0] || '';
+    const lastName = student.last_name || student.full_name?.split(' ').slice(1).join(' ') || '';
+    const fullName = (student.full_name || `${firstName} ${lastName}`).toLowerCase();
+    
     const matchesSearch =
-      student.full_name?.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      fullName.includes(searchTerm.toLowerCase()) ||
       student.email?.toLowerCase().includes(searchTerm.toLowerCase()) ||
       student.student_number?.toLowerCase().includes(searchTerm.toLowerCase());
     const matchesFilter =
@@ -326,8 +481,10 @@ const StudentManagement = () => {
     }
     return matchesSearch && matchesFilter && matchesYear && matchesDate;
   }).sort((a, b) => {
-    if (filterSort === 'name-asc') return (a.full_name || '').localeCompare(b.full_name || '');
-    if (filterSort === 'name-desc') return (b.full_name || '').localeCompare(a.full_name || '');
+    const nameA = `${a.last_name} ${a.first_name}`.toLowerCase();
+    const nameB = `${b.last_name} ${b.first_name}`.toLowerCase();
+    if (filterSort === 'name-asc') return nameA.localeCompare(nameB);
+    if (filterSort === 'name-desc') return nameB.localeCompare(nameA);
     if (filterSort === 'newest') return new Date(b.created_at) - new Date(a.created_at);
     if (filterSort === 'oldest') return new Date(a.created_at) - new Date(b.created_at);
     return 0;
@@ -367,7 +524,9 @@ const StudentManagement = () => {
   const handleEditStudent = (student) => {
     setSelectedStudent(student);
     setEditFormData({
-      full_name: student.full_name || '',
+      first_name: student.first_name || '',
+      last_name: student.last_name || '',
+      middle_initial: student.middle_initial || '',
       email: student.email || '',
       student_number: student.student_number || '',
       year_level: student.year_level || '',
@@ -379,14 +538,40 @@ const StudentManagement = () => {
   const handleSaveEdit = async (e) => {
     e.preventDefault();
     try {
-      const { error: updateError } = await supabase.from('profiles').update({
-        full_name: editFormData.full_name,
+      const updateData = {
+        first_name: editFormData.first_name,
+        last_name: editFormData.last_name,
+        middle_initial: editFormData.middle_initial,
         student_number: editFormData.student_number,
         year_level: editFormData.year_level,
         phone_number: editFormData.phone_number,
         updated_at: new Date().toISOString()
-      }).eq('id', selectedStudent.id);
-      if (updateError) throw updateError;
+      };
+
+      const { error: updateError } = await supabase
+        .from('profiles')
+        .update(updateData)
+        .eq('id', selectedStudent.id);
+
+      // PGRST204 is the error code for "column does not exist"
+      if (updateError && updateError.code === 'PGRST204') {
+        process.env.NODE_ENV === 'development' && console.warn('Falling back to full_name update...');
+        const fallbackData = {
+          full_name: `${editFormData.first_name} ${editFormData.last_name}`.trim(),
+          student_number: editFormData.student_number,
+          year_level: editFormData.year_level,
+          phone_number: editFormData.phone_number,
+          updated_at: new Date().toISOString()
+        };
+        const { error: fallbackError } = await supabase
+          .from('profiles')
+          .update(fallbackData)
+          .eq('id', selectedStudent.id);
+        
+        if (fallbackError) throw fallbackError;
+      } else if (updateError) {
+        throw updateError;
+      }
 
       await fetchStudents();
       setShowEditModal(false);
@@ -394,22 +579,37 @@ const StudentManagement = () => {
       success('Student information updated successfully');
     } catch (err) {
       console.error('Error updating student:', err);
-      error('Failed to update student information');
+      error('Failed to update student information: ' + (err.message || 'Unknown error'));
     }
   };
 
   const handleCreateCoAdmin = async (coAdminData) => {
     try {
       const { data: authData, error: authError } = await supabase.auth.signUp({
-        email: coAdminData.email, password: coAdminData.password,
-        options: { data: { full_name: coAdminData.full_name, role: 'admin' } }
+        email: coAdminData.email,
+        password: coAdminData.password,
+        options: {
+          data: {
+            first_name: coAdminData.first_name,
+            last_name: coAdminData.last_name,
+            middle_initial: coAdminData.middle_initial,
+            role: 'admin'
+          }
+        }
       });
       if (authError) throw authError;
 
       const { error: profileError } = await supabase.from('profiles').insert({
-        id: authData.user.id, full_name: coAdminData.full_name, email: coAdminData.email,
-        phone_number: coAdminData.phone_number, role: 'admin', is_active: true,
-        created_at: new Date().toISOString(), updated_at: new Date().toISOString()
+        id: authData.user.id,
+        first_name: coAdminData.first_name,
+        last_name: coAdminData.last_name,
+        middle_initial: coAdminData.middle_initial,
+        email: coAdminData.email,
+        phone_number: coAdminData.phone_number,
+        role: 'admin',
+        is_active: true,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString()
       });
       if (profileError) throw profileError;
 
@@ -529,15 +729,16 @@ const StudentManagement = () => {
 
         <div className="space-y-4">
           {filteredStudents.length > 0 ? (
-            filteredStudents.map((student) => (
-              <StudentCard
-                key={student.id}
-                student={student}
-                handleEditStudent={handleEditStudent}
-                handleDeleteStudent={handleDeleteStudent}
-                toggleStudentStatus={toggleStudentStatus}
-              />
-            ))
+              filteredStudents.map((student) => (
+                <StudentCard
+                  key={student.id}
+                  student={student}
+                  handleEditStudent={handleEditStudent}
+                  handleDeleteStudent={handleDeleteStudent}
+                  toggleStudentStatus={toggleStudentStatus}
+                  onView={(s) => setViewStudent(s)}
+                />
+              ))
           ) : (
             <div className="text-center py-12">
               <Users className="w-16 h-16 mx-auto mb-4 text-gray-300" />
@@ -566,6 +767,9 @@ const StudentManagement = () => {
             setShowCoAdminModal={setShowCoAdminModal}
             warning={warning}
           />
+        )}
+        {viewStudent && (
+          <ViewStudentModal student={viewStudent} onClose={() => setViewStudent(null)} />
         )}
       </div>
     </>

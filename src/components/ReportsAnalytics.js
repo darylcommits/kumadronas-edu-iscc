@@ -1,4 +1,3 @@
-// ReportsAnalytics.js - Admin reports and analytics page
 import React, { useState, useEffect, useCallback } from 'react';
 import { supabase } from '../lib/supabase';
 import {
@@ -12,14 +11,25 @@ import {
   XCircle,
   PieChart,
   Activity,
-  FileText
+  FileText,
+  ChevronLeft,
+  ChevronRight,
+  MapPin,
+  Shield,
+  UserCheck,
+  Users
 } from 'lucide-react';
 
 const ReportsAnalytics = () => {
   const [dateRange, setDateRange] = useState('30');
-  const [reportType, setReportType] = useState('overview');
+  const [reportType, setReportType] = useState('calendar');
   const [loading, setLoading] = useState(true);
   const [analyticsData, setAnalyticsData] = useState({});
+  const [calendarDate, setCalendarDate] = useState(new Date());
+  const [calendarSchedules, setCalendarSchedules] = useState([]);
+  const [calendarLocation, setCalendarLocation] = useState('all');
+  const [calendarLoading, setCalendarLoading] = useState(false);
+  const [hospitalLocations, setHospitalLocations] = useState([]);
 
   const fetchAnalyticsData = useCallback(async () => {
     try {
@@ -34,20 +44,24 @@ const ReportsAnalytics = () => {
         .select(`
           *,
           schedules!inner(date, status),
-          profiles!student_id(full_name, year_level)
+          profiles!student_id(first_name, last_name, year_level)
         `)
         .gte('schedules.date', startDate.toISOString().split('T')[0])
         .lte('schedules.date', endDate.toISOString().split('T')[0]);
 
       if (dutiesError) throw dutiesError;
 
-      // Fetch student statistics
-      const { data: students, error: studentsError } = await supabase
+      // Fetch system users statistics
+      const { data: allProfiles, error: profilesError } = await supabase
         .from('profiles')
-        .select('*')
-        .eq('role', 'student');
+        .select('*');
 
-      if (studentsError) throw studentsError;
+      if (profilesError) throw profilesError;
+
+      const students = allProfiles?.filter(p => p.role === 'student') || [];
+      const admins = allProfiles?.filter(p => p.role === 'admin') || [];
+      const coAdmins = allProfiles?.filter(p => p.role === 'co-admin') || [];
+      const parents = allProfiles?.filter(p => p.role === 'parent') || [];
 
       // Calculate analytics
       const totalDuties = duties?.length || 0;
@@ -71,7 +85,7 @@ const ReportsAnalytics = () => {
 
       // Student performance
       const studentPerformance = duties?.reduce((acc, duty) => {
-        const studentName = duty.profiles.full_name;
+        const studentName = duty.profiles ? `${duty.profiles.first_name} ${duty.profiles.last_name}` : 'Unknown Student';
         if (!acc[studentName]) {
           acc[studentName] = { total: 0, completed: 0, cancelled: 0 };
         }
@@ -86,14 +100,31 @@ const ReportsAnalytics = () => {
         completedDuties,
         cancelledDuties,
         pendingDuties,
-        totalStudents: students?.length || 0,
-        activeStudents: students?.filter(s => s.is_active).length || 0,
+        totalStudents: students.length,
+        activeStudents: students.filter(s => s.is_active).length || 0,
+        totalAdmins: admins.length,
+        totalCoAdmins: coAdmins.length,
+        totalParents: parents.length,
         yearLevelStats,
         dailyDuties,
         studentPerformance,
         completionRate: totalDuties > 0 ? Math.round((completedDuties / totalDuties) * 100) : 0,
         cancellationRate: totalDuties > 0 ? Math.round((cancelledDuties / totalDuties) * 100) : 0
       });
+
+      // Fetch dynamic hospital locations from system_settings
+      try {
+        const { data: locData, error: locError } = await supabase
+          .from('system_settings')
+          .select('value')
+          .eq('key', 'hospital_locations')
+          .single();
+        if (!locError && locData) {
+          setHospitalLocations(JSON.parse(locData.value));
+        }
+      } catch (locErr) {
+        console.warn('Could not fetch locations in ReportsAnalytics:', locErr);
+      }
 
     } catch (error) {
       console.error('Error fetching analytics:', error);
@@ -102,9 +133,30 @@ const ReportsAnalytics = () => {
     }
   }, [dateRange]);
 
-  useEffect(() => {
-    fetchAnalyticsData();
-  }, [fetchAnalyticsData]);
+  // Fetch schedules for calendar view
+  const fetchCalendarSchedules = useCallback(async () => {
+    setCalendarLoading(true);
+    try {
+      const year = calendarDate.getFullYear();
+      const month = calendarDate.getMonth();
+      const start = new Date(year, month, 1).toISOString().split('T')[0];
+      const end = new Date(year, month + 1, 0).toISOString().split('T')[0];
+      const { data } = await supabase
+        .from('schedules')
+        .select(`*, schedule_students(id, status, profiles:student_id(first_name, last_name))`)
+        .gte('date', start)
+        .lte('date', end)
+        .order('date', { ascending: true });
+      setCalendarSchedules(data || []);
+    } catch (e) {
+      console.error('Error fetching calendar schedules:', e);
+    } finally {
+      setCalendarLoading(false);
+    }
+  }, [calendarDate]);
+
+  useEffect(() => { fetchAnalyticsData(); }, [fetchAnalyticsData]);
+  useEffect(() => { if (reportType === 'calendar') fetchCalendarSchedules(); }, [reportType, fetchCalendarSchedules]);
 
   const exportReport = (format) => {
     const reportData = {
@@ -131,57 +183,6 @@ const ReportsAnalytics = () => {
       const a = document.createElement('a');
       a.href = url;
       a.download = `duty-report-${dateRange}days-${new Date().toISOString().split('T')[0]}.json`;
-      a.click();
-      URL.revokeObjectURL(url);
-    } else if (format === 'csv') {
-      const headers = ['Metric', 'Value'];
-      const csvContent = [
-        `Report Period: Last ${dateRange} days`,
-        `Generated: ${new Date().toLocaleString()}`,
-        '',
-        headers.join(','),
-        ...flatData.map(row => `"${row.Metric}","${row.Value}"`)
-      ].join('\n');
-
-      const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `duty-report-${dateRange}days-${new Date().toISOString().split('T')[0]}.csv`;
-      a.click();
-      URL.revokeObjectURL(url);
-    } else if (format === 'excel') {
-      // Create HTML table for Excel
-      const tableHTML = `
-        <html>
-          <head>
-            <meta charset="utf-8">
-            <title>Duty Report - Last ${dateRange} Days</title>
-          </head>
-          <body>
-            <h1>Duty Report - Last ${dateRange} Days</h1>
-            <p>Generated: ${new Date().toLocaleString()}</p>
-            <br>
-            <table border="1" cellpadding="5" cellspacing="0">
-              <thead>
-                <tr>
-                  <th>Metric</th>
-                  <th>Value</th>
-                </tr>
-              </thead>
-              <tbody>
-                ${flatData.map(row => `<tr><td>${row.Metric}</td><td>${row.Value}</td></tr>`).join('')}
-              </tbody>
-            </table>
-          </body>
-        </html>
-      `;
-
-      const blob = new Blob([tableHTML], { type: 'application/vnd.ms-excel' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `duty-report-${dateRange}days-${new Date().toISOString().split('T')[0]}.xls`;
       a.click();
       URL.revokeObjectURL(url);
     } else if (format === 'pdf') {
@@ -327,6 +328,51 @@ const ReportsAnalytics = () => {
           </div>
         </div>
       </div>
+      
+      {/* System Workforce Overview */}
+      <div className="card bg-gray-50 border border-gray-100 shadow-inner">
+        <div className="flex items-center space-x-2 mb-4">
+          <Activity className="w-5 h-5 text-emerald-600" />
+          <h3 className="text-lg font-semibold text-gray-900">System Workforce Overview</h3>
+        </div>
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+          <div className="bg-white p-4 rounded-2xl border border-gray-100 shadow-sm">
+            <div className="flex items-center space-x-3 text-emerald-600 mb-1">
+              <Users className="w-4 h-4" />
+              <span className="text-[10px] font-bold uppercase tracking-wider">Students</span>
+            </div>
+            <p className="text-2xl font-black text-gray-900">{analyticsData.totalStudents}</p>
+            <p className="text-[10px] text-gray-400 font-medium">{analyticsData.activeStudents} Active Accounts</p>
+          </div>
+          
+          <div className="bg-white p-4 rounded-2xl border border-gray-100 shadow-sm">
+            <div className="flex items-center space-x-3 text-purple-600 mb-1">
+              <Shield className="w-4 h-4" />
+              <span className="text-[10px] font-bold uppercase tracking-wider">Admins</span>
+            </div>
+            <p className="text-2xl font-black text-gray-900">{analyticsData.totalAdmins}</p>
+            <p className="text-[10px] text-gray-400 font-medium">System Administrators</p>
+          </div>
+          
+          <div className="bg-white p-4 rounded-2xl border border-gray-100 shadow-sm">
+            <div className="flex items-center space-x-3 text-blue-600 mb-1">
+              <UserCheck className="w-4 h-4" />
+              <span className="text-[10px] font-bold uppercase tracking-wider">Co-Admins</span>
+            </div>
+            <p className="text-2xl font-black text-gray-900">{analyticsData.totalCoAdmins}</p>
+            <p className="text-[10px] text-gray-400 font-medium">Administrative Support</p>
+          </div>
+          
+          <div className="bg-white p-4 rounded-2xl border border-gray-100 shadow-sm">
+            <div className="flex items-center space-x-3 text-amber-600 mb-1">
+              <Users className="w-4 h-4" />
+              <span className="text-[10px] font-bold uppercase tracking-wider">Parents</span>
+            </div>
+            <p className="text-2xl font-black text-gray-900">{analyticsData.totalParents}</p>
+            <p className="text-[10px] text-gray-400 font-medium">Linked Guardians</p>
+          </div>
+        </div>
+      </div>
 
       {/* Charts and Detailed Analytics */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
@@ -454,13 +500,6 @@ const ReportsAnalytics = () => {
             <Download className="w-4 h-4" />
             <span>Export PDF</span>
           </button>
-          <button
-            onClick={() => exportReport('excel')}
-            className="btn-secondary flex items-center space-x-2"
-          >
-            <FileText className="w-4 h-4" />
-            <span>Export Excel</span>
-          </button>
         </div>
       </div>
 
@@ -469,11 +508,7 @@ const ReportsAnalytics = () => {
         <div className="flex flex-col sm:flex-row gap-4">
           <div className="flex items-center space-x-2">
             <Calendar className="w-5 h-5 text-gray-400" />
-            <select
-              value={dateRange}
-              onChange={(e) => setDateRange(e.target.value)}
-              className="input-field w-40"
-            >
+            <select value={dateRange} onChange={(e) => setDateRange(e.target.value)} className="input-field w-40">
               <option value="7">Last 7 days</option>
               <option value="30">Last 30 days</option>
               <option value="90">Last 3 months</option>
@@ -482,15 +517,11 @@ const ReportsAnalytics = () => {
           </div>
           <div className="flex items-center space-x-2">
             <Filter className="w-5 h-5 text-gray-400" />
-            <select
-              value={reportType}
-              onChange={(e) => setReportType(e.target.value)}
-              className="input-field w-48"
-            >
+            <select value={reportType} onChange={(e) => setReportType(e.target.value)} className="input-field w-48">
               <option value="overview">Overview Report</option>
+              <option value="calendar">Monthly Calendar</option>
               <option value="student">Student Performance</option>
               <option value="attendance">Attendance Report</option>
-              <option value="trends">Trend Analysis</option>
             </select>
           </div>
         </div>
@@ -499,8 +530,158 @@ const ReportsAnalytics = () => {
       {/* Report Content */}
       {reportType === 'overview' && <OverviewReport />}
 
-      {/* Additional report types would be implemented here */}
-      {reportType !== 'overview' && (
+      {/* Monthly Calendar View */}
+      {reportType === 'calendar' && (
+        <div className="space-y-4">
+          {/* Location filter */}
+          <div className="flex flex-col sm:flex-row sm:items-center gap-3">
+            <div className="flex items-center space-x-2">
+              <MapPin className="w-4 h-4 text-gray-400" />
+              <select
+                value={calendarLocation}
+                onChange={e => setCalendarLocation(e.target.value)}
+                className="input-field w-56"
+              >
+                <option value="all">All Locations</option>
+                {hospitalLocations.map((loc, idx) => (
+                  <option key={idx} value={loc.name}>{loc.name}</option>
+                ))}
+              </select>
+            </div>
+            {calendarLoading && <span className="text-sm text-gray-400">Loading...</span>}
+          </div>
+
+          {/* Month navigation */}
+          <div className="card">
+            <div className="flex justify-between items-center mb-4">
+              <button
+                onClick={() => setCalendarDate(new Date(calendarDate.getFullYear(), calendarDate.getMonth() - 1))}
+                className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
+              ><ChevronLeft className="w-5 h-5" /></button>
+              <h3 className="text-xl font-bold text-gray-900">
+                {calendarDate.toLocaleDateString('en-US', { month: 'long', year: 'numeric' })}
+              </h3>
+              <button
+                onClick={() => setCalendarDate(new Date(calendarDate.getFullYear(), calendarDate.getMonth() + 1))}
+                className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
+              ><ChevronRight className="w-5 h-5" /></button>
+            </div>
+
+            {/* Calendar Grid */}
+            <div className="overflow-x-auto">
+              <div className="min-w-[700px]">
+                <div className="grid grid-cols-7 bg-gray-50 border border-gray-200 rounded-t-lg">
+                  {['Sun','Mon','Tue','Wed','Thu','Fri','Sat'].map(d => (
+                    <div key={d} className="py-2 text-center text-xs font-semibold text-gray-600 border-r border-gray-200 last:border-r-0">{d}</div>
+                  ))}
+                </div>
+                {(() => {
+                  const year = calendarDate.getFullYear();
+                  const month = calendarDate.getMonth();
+                  const firstDay = new Date(year, month, 1).getDay();
+                  const daysInMonth = new Date(year, month + 1, 0).getDate();
+                  const today = new Date();
+                  const cells = [];
+                  let day = 1 - firstDay;
+                  for (let row = 0; row < 6; row++) {
+                    const week = [];
+                    for (let col = 0; col < 7; col++, day++) {
+                      const isCurrentMonth = day >= 1 && day <= daysInMonth;
+                      const dateStr = isCurrentMonth
+                        ? `${year}-${String(month+1).padStart(2,'0')}-${String(day).padStart(2,'0')}`
+                        : null;
+                      const daySchedules = dateStr
+                        ? calendarSchedules.filter(s =>
+                            s.date === dateStr &&
+                            (calendarLocation === 'all' || s.location === calendarLocation)
+                          )
+                        : [];
+                      
+                      const locationColors = {
+                        'ISDH - Magsingal':     'bg-blue-100 text-blue-700 border-blue-200',
+                        'ISDH - Sinait':        'bg-green-100 text-green-700 border-green-200',
+                        'ISDH - Narvacan':      'bg-purple-100 text-purple-700 border-purple-200',
+                        'ISPH - Gab. Silang':   'bg-red-100 text-red-700 border-red-200',
+                        'RHU - Sto. Domingo':   'bg-amber-100 text-amber-700 border-amber-200',
+                        'RHU - Santa':          'bg-pink-100 text-pink-700 border-pink-200',
+                        'RHU - San Ildefonso':  'bg-indigo-100 text-indigo-700 border-indigo-200',
+                        'RHU - Bantay':         'bg-orange-100 text-orange-700 border-orange-200'
+                      };
+
+                      const isToday = isCurrentMonth && today.getFullYear() === year && today.getMonth() === month && today.getDate() === day;
+                      
+                      week.push(
+                        <div
+                          key={col}
+                          className={`min-h-[110px] p-1.5 border-r border-b border-gray-200 last:border-r-0 ${
+                            isCurrentMonth ? 'bg-white' : 'bg-gray-50'
+                          } ${isToday ? 'bg-blue-50/50' : ''}`}
+                        >
+                          <div className="flex justify-between items-start mb-1">
+                            <span className={`text-xs font-bold px-1.5 py-0.5 rounded-md ${
+                              isToday ? 'bg-blue-600 text-white shadow-sm' : isCurrentMonth ? 'text-gray-900 bg-gray-100' : 'text-gray-300'
+                            }`}>
+                              {isCurrentMonth ? day : ''}
+                            </span>
+                          </div>
+                          <div className="space-y-1">
+                            {daySchedules.map(s => {
+                              const activeStudents = s.schedule_students?.filter(ss => ss.status !== 'cancelled') || [];
+                              const locColor = locationColors[s.location] || 'bg-gray-100 text-gray-700 border-gray-200';
+                              
+                              return (
+                                <div key={s.id} className={`p-1 rounded border ${locColor} shadow-sm-light`}>
+                                  {calendarLocation === 'all' && (
+                                    <p className="text-[9px] font-black uppercase tracking-tighter mb-0.5 border-b border-current opacity-70">
+                                      {s.location?.split(' - ')[1] || s.location}
+                                    </p>
+                                  )}
+                                  <div className="space-y-0.5">
+                                    {activeStudents.map(ss => {
+                                      const p = ss.profiles || {};
+                                      const name = p.last_name 
+                                        ? `${p.last_name}, ${p.first_name?.[0] || ''}.` 
+                                        : (p.full_name?.split(' ').pop() || 'Student');
+                                      return (
+                                        <div key={ss.id} className="flex items-center space-x-1">
+                                          <div className={`w-1 h-1 rounded-full ${ss.status === 'completed' ? 'bg-green-500' : 'bg-current opacity-50'}`}></div>
+                                          <p className="text-[9px] font-bold leading-tight truncate" title={p.full_name || `${p.first_name} ${p.last_name}`}>
+                                            {name}
+                                          </p>
+                                        </div>
+                                      );
+                                    })}
+                                    {activeStudents.length === 0 && (
+                                      <p className="text-[9px] italic opacity-50">Empty Shift</p>
+                                    )}
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      );
+                    }
+                    cells.push(
+                      <div key={row} className="grid grid-cols-7 border-l border-gray-200">{week}</div>
+                    );
+                  }
+                  return cells;
+                })()}
+              </div>
+            </div>
+
+            {/* Legend */}
+            <div className="flex gap-4 mt-3 text-xs text-gray-500">
+              <span className="flex items-center gap-1"><span className="w-3 h-3 rounded bg-emerald-100 border border-emerald-300"></span>Approved</span>
+              <span className="flex items-center gap-1"><span className="w-3 h-3 rounded bg-yellow-100 border border-yellow-300"></span>Pending</span>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Other report types */}
+      {reportType !== 'overview' && reportType !== 'calendar' && (
         <div className="card text-center py-12">
           <Activity className="w-16 h-16 mx-auto mb-4 text-gray-300" />
           <h3 className="text-lg font-medium text-gray-900 mb-2">
@@ -519,16 +700,21 @@ const ReportsAnalytics = () => {
           <div>
             <h4 className="font-medium text-gray-900">Export Options</h4>
             <p className="text-sm text-gray-600 mt-1">
-              Reports can be exported in PDF, Excel, or JSON formats. Data includes duty schedules,
+              Reports can be exported in PDF or JSON formats. Data includes duty schedules,
               student performance metrics, and attendance tracking for the selected period.
             </p>
             <div className="flex space-x-2 mt-3">
-             
               <button
-                onClick={() => exportReport('csv')}
-                className="text-xs bg-gray-200 hover:bg-gray-300 px-3 py-1 rounded"
+                onClick={() => exportReport('pdf')}
+                className="text-xs bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-1.5 rounded-lg shadow-sm font-semibold transition-colors"
               >
-                Export CSV
+                Export PDF
+              </button>
+              <button
+                onClick={() => exportReport('json')}
+                className="text-xs bg-gray-200 hover:bg-gray-300 px-4 py-1.5 rounded-lg font-semibold transition-colors"
+              >
+                JSON Export
               </button>
             </div>
           </div>

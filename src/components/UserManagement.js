@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { supabase } from '../lib/supabase';
+import { supabase, dbHelpers } from '../lib/supabase';
 import {
   Users,
   Search,
@@ -25,7 +25,9 @@ import {
   Save,
   Lock,
   AlertCircle,
-  ChevronRight
+  ChevronRight,
+  Trash2,
+  Plus
 } from 'lucide-react';
 
 const ROLE_STYLES = {
@@ -53,8 +55,8 @@ const StatusBadge = ({ isActive }) => (
 );
 
 const EMPTY_ADD_FORM = {
-  full_name: '', email: '', role: 'student',
-  phone_number: '', student_number: '', year_level: '1st Year', password: ''
+  first_name: '', last_name: '', middle_initial: '', email: '', role: 'student',
+  phone_number: '', student_number: '', parent_student_numbers: [''], year_level: '1st Year', password: ''
 };
 
 const YEAR_LEVELS = ['1st Year', '2nd Year', '3rd Year', '4th Year'];
@@ -98,10 +100,14 @@ const UserManagement = () => {
   const [pendingLoading, setPendingLoading] = useState(false);
   const [declineModal, setDeclineModal]     = useState(null); // { user } | null
   const [declineReason, setDeclineReason]   = useState('');
-  const [pendingCount, setPendingCount]     = useState(0);
-  const [viewPending, setViewPending]       = useState(null); // pending_registrations row
-  const [confirmApprove, setConfirmApprove] = useState(null); // pending reg awaiting confirmation
-  const [successMsg, setSuccessMsg]         = useState(null); // 'approved' | 'declined' | null
+  const [successMsg, setSuccessMsg]         = useState(null); // 'approved' | 'declined' | 'linked' | null
+  const [viewPending, setViewPending]       = useState(null);
+  const [confirmApprove, setConfirmApprove] = useState(null);
+  const [pendingLinks, setPendingLinks]     = useState([]);
+  const [linksLoading, setLinksLoading]     = useState(false);
+  const [pendingLinksCount, setPendingLinksCount] = useState(0);
+  const [usersPage, setUsersPage]           = useState(1);
+  const USERS_PER_PAGE = 10;
 
   const fetchUsers = useCallback(async () => {
     setLoading(true);
@@ -144,38 +150,141 @@ const UserManagement = () => {
     }
   }, []);
 
+  const [pendingChildDetails, setPendingChildDetails] = useState({});
+
+  const fetchPendingChildDetails = useCallback(async (studentNumbers) => {
+    if (!studentNumbers || studentNumbers.length === 0) return;
+    try {
+      const { data, error } = await supabase
+        .from('profiles')
+        .select('student_number, first_name, last_name')
+        .in('student_number', studentNumbers);
+      
+      if (error) throw error;
+      
+      const details = {};
+      data.forEach(s => {
+        details[s.student_number] = `${s.first_name} ${s.last_name}`;
+      });
+      setPendingChildDetails(prev => ({ ...prev, ...details }));
+    } catch (err) {
+      console.error('Error fetching child details:', err);
+    }
+  }, []);
+
+  const [pendingCount, setPendingCount] = useState(0);
   const [approveLoading, setApproveLoading] = useState(null); // id being approved
+
+  const fetchPendingLinks = useCallback(async () => {
+    setLinksLoading(true);
+    try {
+      const { data, error } = await dbHelpers.getPendingLinkRequests();
+      if (error) throw error;
+      setPendingLinks(data || []);
+      setPendingLinksCount((data || []).length);
+    } catch (err) {
+      console.error('Error fetching pending links:', err);
+    } finally {
+      setLinksLoading(false);
+    }
+  }, []);
 
   const handleApprove = async (reg) => {
     setApproveLoading(reg.id);
     try {
-      // If a profile already exists from old signup flow, activate it now
+      // If a profile already exists, activate it now and mark as approved
       await supabase.from('profiles').update({
         is_active: true,
         approval_status: 'approved'
-      }).eq('email', reg.email);
+      }).ilike('email', reg.email.trim());
 
-      // Create auth user (if not exists) + send magic login link.
-      // Embed student info as user_metadata so createProfileFromAuth always has the data
-      const { error: otpError } = await supabase.auth.signInWithOtp({
-        email: reg.email,
-        options: {
-          shouldCreateUser: true,
-          data: {
-            full_name:      reg.full_name      || '',
-            role:           reg.role           || 'student',
-            phone_number:   reg.phone_number   || null,
-            student_number: reg.student_number || null,
-            year_level:     reg.year_level     || null,
+      // Handle multiple children if parent
+      let studentNumbers = [];
+      if (reg.role === 'parent' && reg.student_number) {
+        try {
+          const parsed = JSON.parse(reg.student_number);
+          if (Array.isArray(parsed)) {
+            studentNumbers = parsed;
           }
+        } catch (e) {
+          // If not JSON, it might be a single string from old flow
+          studentNumbers = [reg.student_number];
+        }
+      }
+
+      // Confirm the user's email via RPC so they can log in
+      // (Supabase email confirmation may be required; this bypasses it on admin approval)
+      // First resolve the user's UID with retry
+      let userId = null;
+      for (let i = 0; i < 5; i++) {
+        const { data: foundId } = await supabase.rpc('get_auth_user_id_by_email', { p_email: reg.email.trim() });
+        if (foundId) { userId = foundId; break; }
+        await new Promise(r => setTimeout(r, 1000));
+      }
+
+      if (userId) {
+        // Confirm the email so password login works immediately
+        await supabase.rpc('confirm_user_email', { user_id: userId });
+
+        // Activate the profile NOW — this is the authoritative approval
+        await supabase.from('profiles').upsert({
+          id:              userId,
+          email:           reg.email.trim().toLowerCase(),
+          first_name:      reg.first_name     || '',
+          last_name:       reg.last_name      || '',
+          middle_initial:  reg.middle_initial || null,
+          role:            reg.role           || 'student',
+          phone_number:    reg.phone_number   || null,
+          student_number:  reg.role === 'student' ? reg.student_number : null,
+          year_level:      reg.year_level     || null,
+          is_active:       true,
+          approval_status: 'approved',
+        }, { onConflict: 'id' });
+      }
+
+      // Send a verification email to the EXISTING user (shouldCreateUser: false preserves their password)
+      const { error: otpError } = await supabase.auth.signInWithOtp({
+        email: reg.email.trim(),
+        options: {
+          shouldCreateUser: false, // User already exists from signUp — preserve their password
         }
       });
-      if (otpError) throw otpError;
+      if (otpError) {
+        // Non-fatal: profile is already activated; user can log in with their password
+        console.warn('OTP send failed (non-fatal, profile is already activated):', otpError.message);
+      }
 
-      // Mark as approved — profile will be created in App.js when student clicks the link
+      // Mark as approved in registration records
       await supabase.from('pending_registrations').update({
         status: 'approved'
       }).eq('id', reg.id);
+
+      // Establish parent-student links if userId was resolved above
+      if (userId && reg.role === 'parent' && studentNumbers.length > 0) {
+        for (const num of studentNumbers) {
+          const { data: student } = await supabase.from('profiles').select('id').eq('student_number', num).eq('role', 'student').maybeSingle();
+          if (student) {
+            await supabase.from('parent_student_links').upsert({
+              parent_id: userId,
+              student_id: student.id,
+              status: 'approved'
+            }, { onConflict: 'parent_id,student_id' });
+          }
+        }
+      }
+
+      // Log the registration approval
+      try {
+        const { data: { user: currentUser } } = await supabase.auth.getUser();
+        await supabase.from('duty_logs').insert({
+          action: 'registration_approved',
+          performed_by: currentUser?.id,
+          target_user: reg.email, // Use email as target since ID might not exist yet
+          notes: `Admin approved signup for ${reg.first_name} ${reg.last_name} (${reg.role})`
+        });
+      } catch (logErr) {
+        console.warn('Failed to log registration approval:', logErr);
+      }
 
       setPendingSignups(prev => prev.filter(u => u.id !== reg.id));
       setPendingCount(prev => Math.max(0, prev - 1));
@@ -197,6 +306,19 @@ const UserManagement = () => {
         rejection_reason: declineReason || 'You do not meet the requirements.'
       }).eq('id', declineModal.id);
 
+      // Log the registration decline
+      try {
+        const { data: { user: currentUser } } = await supabase.auth.getUser();
+        await supabase.from('duty_logs').insert({
+          action: 'registration_declined',
+          performed_by: currentUser?.id,
+          target_user: declineModal.email,
+          notes: `Admin declined signup for ${declineModal.first_name} ${declineModal.last_name}. Reason: ${declineReason || 'Not specified'}`
+        });
+      } catch (logErr) {
+        console.warn('Failed to log registration decline:', logErr);
+      }
+
       setPendingSignups(prev => prev.filter(u => u.id !== declineModal.id));
       setPendingCount(prev => Math.max(0, prev - 1));
       setDeclineModal(null);
@@ -211,7 +333,41 @@ const UserManagement = () => {
   useEffect(() => {
     fetchUsers();
     fetchPendingSignups();
-  }, [fetchUsers, fetchPendingSignups]);
+    fetchPendingLinks();
+  }, [fetchUsers, fetchPendingSignups, fetchPendingLinks]);
+
+  // Observer for viewPending child details
+  useEffect(() => {
+    if (viewPending?.role === 'parent' && viewPending.student_number) {
+      try {
+        const parsed = JSON.parse(viewPending.student_number);
+        if (Array.isArray(parsed)) {
+          const relevantNums = parsed.filter(n => n && !pendingChildDetails[n]);
+          if (relevantNums.length > 0) fetchPendingChildDetails(parsed);
+        }
+      } catch (e) {
+        if (viewPending.student_number && !pendingChildDetails[viewPending.student_number]) {
+          fetchPendingChildDetails([viewPending.student_number]);
+        }
+      }
+    }
+  }, [viewPending, pendingChildDetails, fetchPendingChildDetails]);
+
+  const handleLinkAction = async (linkId, status) => {
+    try {
+      const { data: { user: admin } } = await supabase.auth.getUser();
+      const { error } = await dbHelpers.handleLinkRequest(linkId, status, admin?.id);
+      if (error) throw error;
+
+      setPendingLinks(prev => prev.filter(l => l.id !== linkId));
+      setPendingLinksCount(prev => Math.max(0, prev - 1));
+      setSuccessMsg(status === 'approved' ? 'approved' : 'declined');
+      setTimeout(() => setSuccessMsg(null), 3500);
+    } catch (err) {
+      console.error('Error handling link:', err);
+      alert('Failed to process request');
+    }
+  };
 
   /* ── Toggle active status ── */
   const toggleStatus = async (user) => {
@@ -219,6 +375,20 @@ const UserManagement = () => {
       const { error } = await supabase
         .from('profiles').update({ is_active: !user.is_active }).eq('id', user.id);
       if (error) throw error;
+
+      // Log the status toggle
+      try {
+        const { data: { user: currentUser } } = await supabase.auth.getUser();
+        await supabase.from('duty_logs').insert({
+          action: user.is_active ? 'user_deactivated' : 'user_activated',
+          performed_by: currentUser?.id,
+          target_user: user.id,
+          notes: `Admin ${user.is_active ? 'deactivated' : 'activated'} account for ${user.first_name} ${user.last_name} (${user.role})`
+        });
+      } catch (logErr) {
+        console.warn('Failed to log status toggle:', logErr);
+      }
+
       setUsers(prev => prev.map(u => u.id === user.id ? { ...u, is_active: !u.is_active } : u));
       setStats(prev => ({ ...prev, active: user.is_active ? prev.active - 1 : prev.active + 1 }));
     } catch (err) {
@@ -236,26 +406,73 @@ const UserManagement = () => {
     setShowAddModal(true);
   };
 
+  const addStudentField = (isEdit = false) => {
+    if (isEdit) {
+      setEditForm(prev => ({ ...prev, parent_student_numbers: [...(prev.parent_student_numbers || ['']), ''] }));
+    } else {
+      setAddForm(prev => ({ ...prev, parent_student_numbers: [...(prev.parent_student_numbers || ['']), ''] }));
+    }
+  };
+
+  const removeStudentField = (index, isEdit = false) => {
+    if (isEdit) {
+      if ((editForm.parent_student_numbers || []).length <= 1) return;
+      setEditForm(prev => ({ ...prev, parent_student_numbers: prev.parent_student_numbers.filter((_, i) => i !== index) }));
+    } else {
+      if ((addForm.parent_student_numbers || []).length <= 1) return;
+      setAddForm(prev => ({ ...prev, parent_student_numbers: prev.parent_student_numbers.filter((_, i) => i !== index) }));
+    }
+  };
+
+  const handleStudentNumberChange = (index, val, isEdit = false) => {
+    if (isEdit) {
+      const nums = [...(editForm.parent_student_numbers || [])];
+      nums[index] = val;
+      setEditForm(prev => ({ ...prev, parent_student_numbers: nums }));
+    } else {
+      const nums = [...(addForm.parent_student_numbers || [])];
+      nums[index] = val;
+      setAddForm(prev => ({ ...prev, parent_student_numbers: nums }));
+    }
+  };
+
   const handleAddSubmit = async (e) => {
     e.preventDefault();
     setFormSaving(true);
     setFormError('');
     setFormSuccess('');
 
-    if (!addForm.full_name.trim()) { setFormError('Full name is required.'); setFormSaving(false); return; }
+    if (!addForm.first_name.trim() || !addForm.last_name.trim()) { setFormError('First and last names are required.'); setFormSaving(false); return; }
     if (!addForm.email.trim())     { setFormError('Email is required.');     setFormSaving(false); return; }
     if (!addForm.password || addForm.password.length < 6) {
       setFormError('Password must be at least 6 characters.'); setFormSaving(false); return;
     }
 
     try {
+      // Check and link children if parent
+      const parentLinks = [];
+      if (addForm.role === 'parent' && addForm.parent_student_numbers) {
+        for (const num of addForm.parent_student_numbers) {
+          if (!num.trim()) continue;
+          const { data: student } = await supabase.from('profiles').select('id').eq('student_number', num.trim()).maybeSingle();
+          if (!student) {
+            setFormError(`Student number ${num} not found. Please verify.`);
+            setFormSaving(false);
+            return;
+          }
+          parentLinks.push(student.id);
+        }
+      }
+
       // Create auth user
       const { data, error: signUpError } = await supabase.auth.signUp({
         email: addForm.email.trim(),
         password: addForm.password,
         options: {
           data: {
-            full_name:      addForm.full_name.trim(),
+            first_name:     addForm.first_name.trim(),
+            last_name:      addForm.last_name.trim(),
+            middle_initial: addForm.middle_initial.trim() || null,
             role:           addForm.role,
             phone_number:   addForm.phone_number.trim() || null,
             student_number: addForm.role === 'student' ? addForm.student_number.trim() : null,
@@ -286,8 +503,10 @@ const UserManagement = () => {
         // Save profile
         await supabase.from('profiles').upsert({
           id:              userId,
-          email:           addForm.email.trim(),
-          full_name:       addForm.full_name.trim(),
+          email:           addForm.email.trim().toLowerCase(),
+          first_name:      addForm.first_name.trim(),
+          last_name:       addForm.last_name.trim(),
+          middle_initial:  addForm.middle_initial.trim() || null,
           role:            addForm.role,
           phone_number:    addForm.phone_number.trim() || null,
           student_number:  addForm.role === 'student' ? addForm.student_number.trim() : null,
@@ -296,8 +515,32 @@ const UserManagement = () => {
           approval_status: 'approved',
         }, { onConflict: 'id' });
 
-        // Auto-confirm — admin-created accounts don't need email verification
+        // Auto-confirm
         await supabase.rpc('confirm_user_email', { user_id: userId });
+
+        // Establish parent links if any
+        if (addForm.role === 'parent' && parentLinks.length > 0) {
+          for (const studentId of parentLinks) {
+            await supabase.from('parent_student_links').upsert({
+              parent_id: userId,
+              student_id: studentId,
+              status: 'approved'
+            }, { onConflict: 'parent_id,student_id' });
+          }
+        }
+
+        // Log user creation
+        try {
+          const { data: { user: currentUser } } = await supabase.auth.getUser();
+          await supabase.from('duty_logs').insert({
+            action: 'user_created',
+            performed_by: currentUser?.id,
+            target_user: userId,
+            notes: `Admin created new ${addForm.role} account for ${addForm.first_name} ${addForm.last_name}`
+          });
+        } catch (logErr) {
+          console.warn('Failed to log user creation:', logErr);
+        }
 
         setFormSuccess(`Account for ${addForm.email.trim()} created and activated. The user can log in immediately.`);
         await fetchUsers();
@@ -322,12 +565,23 @@ const UserManagement = () => {
   };
 
   /* ── Edit User ── */
-  const openEditModal = (u) => {
+  const openEditModal = async (u) => {
+    let parentNums = [''];
+    if (u.role === 'parent') {
+      const { data: links } = await supabase.from('parent_student_links').select('profiles(student_number)').eq('parent_id', u.id);
+      if (links && links.length > 0) {
+        parentNums = links.map(l => l.profiles?.student_number);
+      }
+    }
+
     setEditForm({
-      full_name:      u.full_name      || '',
+      first_name:     u.first_name     || '',
+      last_name:      u.last_name      || '',
+      middle_initial: u.middle_initial || '',
       phone_number:   u.phone_number   || '',
       role:           u.role           || 'student',
       student_number: u.student_number || '',
+      parent_student_numbers: parentNums,
       year_level:     u.year_level     || '1st Year',
       is_active:      u.is_active      !== false,
     });
@@ -343,28 +597,83 @@ const UserManagement = () => {
     setFormError('');
     setFormSuccess('');
 
-    if (!editForm.full_name.trim()) {
-      setFormError('Full name is required.'); setFormSaving(false); return;
+    if (!editForm.first_name.trim() || !editForm.last_name.trim()) {
+      setFormError('First and last names are required.'); setFormSaving(false); return;
     }
 
     try {
-      const { error } = await supabase.from('profiles').update({
-        full_name:      editForm.full_name.trim(),
+      const updateData = {
+        first_name:     editForm.first_name.trim(),
+        last_name:      editForm.last_name.trim(),
+        middle_initial: editForm.middle_initial.trim() || null,
         phone_number:   editForm.phone_number.trim() || null,
         role:           editForm.role,
         student_number: editForm.role === 'student' ? editForm.student_number.trim() : null,
         year_level:     editForm.role === 'student' ? editForm.year_level : null,
         is_active:      editForm.is_active,
+        avatar_url:     editForm.avatar_url?.trim() || null,
         updated_at:     new Date().toISOString(),
-      }).eq('id', editUser.id);
+      };
 
-      if (error) throw error;
+      // Handle parent links update
+      if (editForm.role === 'parent' && editForm.parent_student_numbers) {
+        // First, clear existing links if needed OR just add new ones. 
+        // User probably expects the list to reflect the new state.
+        // For simplicity, we'll upsert all mentioned ones. 
+        // A better approach would be to delete ones not in the list.
+        
+        // Let's delete existing links first for full sync
+        await supabase.from('parent_student_links').delete().eq('parent_id', editUser.id);
+        
+        for (const num of editForm.parent_student_numbers) {
+          if (!num.trim()) continue;
+          const { data: student } = await supabase.from('profiles').select('id').eq('student_number', num.trim()).maybeSingle();
+          if (student) {
+            await supabase.from('parent_student_links').upsert({
+              parent_id: editUser.id,
+              student_id: student.id,
+              status: 'approved'
+            });
+          }
+        }
+      }
 
-      setUsers(prev => prev.map(u =>
-        u.id === editUser.id ? { ...u, ...editForm } : u
-      ));
+      const { error } = await supabase.from('profiles').update(updateData).eq('id', editUser.id);
+
+      if (error && error.code === 'PGRST204') {
+        const fallbackData = {
+          full_name: `${editForm.first_name} ${editForm.last_name}`.trim(),
+          phone_number:   editForm.phone_number.trim() || null,
+          role:           editForm.role,
+          student_number: editForm.role === 'student' ? editForm.student_number.trim() : null,
+          year_level:     editForm.role === 'student' ? editForm.year_level : null,
+          is_active:      editForm.is_active,
+          avatar_url:     editForm.avatar_url?.trim() || null,
+          updated_at:     new Date().toISOString(),
+        };
+        const { error: fError } = await supabase.from('profiles').update(fallbackData).eq('id', editUser.id);
+        if (fError) throw fError;
+      } else if (error) {
+        throw error;
+      }
+
+      setUsers(prev => prev.map(u => u.id === editUser.id ? { ...u, ...editForm } : u));
       setFormSuccess('User updated successfully!');
-      await fetchUsers();
+
+      // Log user update
+      try {
+        const { data: { user: currentUser } } = await supabase.auth.getUser();
+        await supabase.from('duty_logs').insert({
+          action: 'user_updated',
+          performed_by: currentUser?.id,
+          target_user: editUser.id,
+          notes: `Admin updated profile for ${editForm.first_name} ${editForm.last_name}`
+        });
+      } catch (logErr) {
+        console.warn('Failed to log user update:', logErr);
+      }
+
+      fetchUsers();
       setTimeout(() => { setEditUser(null); setFormSuccess(''); }, 1500);
     } catch (err) {
       setFormError(err.message);
@@ -376,8 +685,9 @@ const UserManagement = () => {
   /* ── Filter ── */
   const filteredUsers = users.filter(u => {
     const q = searchQuery.toLowerCase();
+    const fullName = `${u.first_name} ${u.last_name}`.toLowerCase();
     const matchSearch = !q ||
-      u.full_name?.toLowerCase().includes(q) ||
+      fullName.includes(q) ||
       u.email?.toLowerCase().includes(q) ||
       u.student_number?.toLowerCase().includes(q);
     const matchRole   = roleFilter   === 'all' || u.role === roleFilter;
@@ -387,12 +697,22 @@ const UserManagement = () => {
   });
 
   const statCards = [
-    { label: 'Total Users', value: stats.total,              color: 'from-slate-500 to-slate-600',   icon: Users },
-    { label: 'Admins',      value: stats.admin,              color: 'from-purple-500 to-purple-600', icon: Shield },
-    { label: 'Co-Admins',   value: stats['co-admin'] || 0,  color: 'from-blue-500 to-blue-600',     icon: UserCheck },
-    { label: 'Students',    value: stats.student,            color: 'from-emerald-500 to-green-600', icon: GraduationCap },
-    { label: 'Active',      value: stats.active,             color: 'from-green-500 to-emerald-600', icon: CheckCircle },
+    { label: 'Total Users',  value: stats.total,             color: 'from-slate-500 to-slate-600',   icon: Users },
+    { label: 'Admins',       value: stats.admin,             color: 'from-purple-500 to-purple-600', icon: Shield },
+    { label: 'Co-Admins',    value: stats['co-admin'] || 0,  color: 'from-blue-500 to-blue-600',     icon: UserCheck },
+    { label: 'Students',     value: stats.student,           color: 'from-emerald-500 to-green-600', icon: GraduationCap },
+    { label: 'Parents',      value: stats.parent || 0,       color: 'from-amber-500 to-amber-600',   icon: Users },
+    { label: 'Active',       value: stats.active,            color: 'from-green-500 to-emerald-600', icon: CheckCircle },
   ];
+
+  // Pagination helpers
+  const activeFilteredUsers = filteredUsers.filter(u => u.is_active !== false);
+  const inactiveUsers = filteredUsers.filter(u => u.is_active === false);
+  const [userTab, setUserTab] = useState('active'); // 'active' | 'inactive'
+  const currentListUsers = userTab === 'active' ? activeFilteredUsers : inactiveUsers;
+  const totalUserPages = Math.max(1, Math.ceil(currentListUsers.length / USERS_PER_PAGE));
+  const userPageStart = (usersPage - 1) * USERS_PER_PAGE;
+  const pagedUsers = currentListUsers.slice(userPageStart, userPageStart + USERS_PER_PAGE);
 
   /* ════════════════════════════════════════════════════════════════════════ */
   return (
@@ -430,21 +750,20 @@ const UserManagement = () => {
       </div>
 
       {/* View Tabs */}
-      <div className="flex space-x-2 border-b border-gray-200 pb-0">
-        <button
-          onClick={() => setActiveView('users')}
-          className={`px-4 py-2.5 text-sm font-semibold rounded-t-lg border-b-2 transition-colors ${activeView === 'users' ? 'border-emerald-600 text-emerald-700' : 'border-transparent text-gray-500 hover:text-gray-700'}`}
-        >
-          All Users
+      <div className="flex bg-gray-100/50 p-1 rounded-2xl w-fit">
+        <button onClick={() => { setActiveView('users'); setUsersPage(1); }}
+          className={`px-4 py-2 rounded-xl text-sm font-semibold transition-all ${activeView === 'users' ? 'bg-white text-emerald-600 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}>
+          Manage Users
         </button>
-        <button
-          onClick={() => { setActiveView('pending'); fetchPendingSignups(); }}
-          className={`relative px-4 py-2.5 text-sm font-semibold rounded-t-lg border-b-2 transition-colors ${activeView === 'pending' ? 'border-amber-500 text-amber-700' : 'border-transparent text-gray-500 hover:text-gray-700'}`}
-        >
-          Pending Signups
-          {pendingCount > 0 && (
-            <span className="ml-2 bg-amber-500 text-white text-xs rounded-full px-2 py-0.5">{pendingCount}</span>
-          )}
+        <button onClick={() => setActiveView('pending')}
+          className={`px-4 py-2 rounded-xl text-sm font-semibold transition-all flex items-center space-x-2 ${activeView === 'pending' ? 'bg-white text-emerald-600 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}>
+          <span>Pending Signups</span>
+          {pendingCount > 0 && <span className="px-2 py-0.5 bg-emerald-100 text-emerald-600 rounded-full text-[10px]">{pendingCount}</span>}
+        </button>
+        <button onClick={() => setActiveView('pending-links')}
+          className={`px-4 py-2 rounded-xl text-sm font-semibold transition-all flex items-center space-x-2 ${activeView === 'pending-links' ? 'bg-white text-emerald-600 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}>
+          <span>Linking Requests</span>
+          {pendingLinksCount > 0 && <span className="px-2 py-0.5 bg-amber-100 text-amber-600 rounded-full text-[10px]">{pendingLinksCount}</span>}
         </button>
       </div>
 
@@ -487,6 +806,26 @@ const UserManagement = () => {
         </p>
       </div>
 
+      {/* Active / Deactivated sub-tabs */}
+      <div className="flex space-x-2">
+        <button
+          onClick={() => { setUserTab('active'); setUsersPage(1); }}
+          className={`px-4 py-1.5 rounded-full text-sm font-medium transition-colors ${
+            userTab === 'active' ? 'bg-emerald-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+          }`}
+        >
+          Active ({activeFilteredUsers.length})
+        </button>
+        <button
+          onClick={() => { setUserTab('inactive'); setUsersPage(1); }}
+          className={`px-4 py-1.5 rounded-full text-sm font-medium transition-colors ${
+            userTab === 'inactive' ? 'bg-red-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+          }`}
+        >
+          Deactivated ({inactiveUsers.length})
+        </button>
+      </div>
+
       {/* Table */}
       <div className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
         {loading ? (
@@ -503,81 +842,145 @@ const UserManagement = () => {
             <p className="text-sm mt-1">Try adjusting your search or filters</p>
           </div>
         ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full">
-              <thead>
-                <tr className="bg-gray-50 border-b border-gray-100">
-                  <th className="text-left px-6 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">User</th>
-                  <th className="text-left px-6 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">Role</th>
-                  <th className="text-left px-6 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide hidden md:table-cell">Contact</th>
-                  <th className="text-left px-6 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide hidden lg:table-cell">Joined</th>
-                  <th className="text-left px-6 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">Status</th>
-                  <th className="text-right px-6 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">Actions</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-50">
-                {filteredUsers.map(u => (
-                  <tr key={u.id} onClick={() => setViewUser(u)} className="hover:bg-emerald-50 transition-colors cursor-pointer">
-                    <td className="px-6 py-4">
-                      <div className="flex items-center space-x-3">
-                        <div className="w-9 h-9 rounded-full bg-gradient-to-br from-emerald-400 to-green-500 flex items-center justify-center flex-shrink-0 shadow-sm overflow-hidden">
-                          {u.avatar_url
-                            ? <img src={u.avatar_url} alt="" className="w-9 h-9 object-cover" />
-                            : <span className="text-white text-xs font-bold">{u.full_name?.split(' ').map(n => n[0]).join('').substring(0, 2) || '?'}</span>
-                          }
-                        </div>
-                        <div className="min-w-0">
-                          <p className="font-semibold text-gray-900 text-sm truncate">{u.full_name || '—'}</p>
-                          <p className="text-xs text-gray-400 truncate">{u.email}</p>
-                          {u.student_number && <p className="text-xs text-emerald-600 font-medium">{u.student_number}</p>}
-                        </div>
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 p-6 bg-gray-50/50">
+            {pagedUsers.map(u => (
+              <div key={u.id} className="bg-white rounded-3xl border border-gray-100 shadow-sm hover:shadow-xl hover:border-emerald-200 transition-all group overflow-hidden flex flex-col relative">
+                {/* Deactivate/Activate Shortcut */}
+                <button 
+                  onClick={(e) => { e.stopPropagation(); setActionModal({ type: 'toggle', user: u }); }}
+                  className={`absolute top-4 right-4 p-2 rounded-full transition-all bg-white shadow-sm border border-gray-100 z-10 ${
+                    u.is_active ? 'text-gray-400 hover:text-red-600 hover:bg-red-50' : 'text-emerald-400 hover:text-emerald-600 hover:bg-emerald-50'
+                  }`}
+                  title={u.is_active ? 'Deactivate Account' : 'Activate Account'}
+                >
+                  {u.is_active ? <UserX className="w-4 h-4" /> : <UserCheck className="w-4 h-4" />}
+                </button>
+
+                <div className="p-6 cursor-pointer" onClick={() => setViewUser(u)}>
+                  <div className="flex items-start space-x-4 mb-4">
+                    <div className={`w-14 h-14 rounded-2xl flex items-center justify-center flex-shrink-0 shadow-inner overflow-hidden ring-4 ring-white ${u.is_active ? 'bg-gradient-to-br from-emerald-400 to-green-500' : 'bg-gray-200 grayscale'}`}>
+                       {u.avatar_url 
+                        ? <img src={u.avatar_url} alt="" className="w-14 h-14 object-cover" />
+                        : <span className="text-white text-xl font-bold">{(u.first_name?.[0] || 'U') + (u.last_name?.[0] || '')}</span>
+                       }
+                    </div>
+                    <div className="min-w-0 pr-6">
+                      <div className="flex items-center space-x-2 mb-1">
+                        <RoleBadge role={u.role} />
                       </div>
-                    </td>
-                    <td className="px-6 py-4">
-                      <RoleBadge role={u.role} />
-                      {u.year_level && <p className="text-xs text-gray-400 mt-1">{u.year_level}</p>}
-                    </td>
-                    <td className="px-6 py-4 hidden md:table-cell">
-                      {u.phone_number
-                        ? <div className="flex items-center space-x-1 text-xs text-gray-600"><Phone className="w-3 h-3 text-gray-400" /><span>{u.phone_number}</span></div>
-                        : <span className="text-xs text-gray-400">—</span>}
-                    </td>
-                    <td className="px-6 py-4 hidden lg:table-cell">
-                      <div className="flex items-center space-x-1 text-xs text-gray-500">
-                        <Calendar className="w-3 h-3 text-gray-400" />
-                        <span>{u.created_at ? new Date(u.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : '—'}</span>
+                      <h4 className="font-bold text-gray-900 truncate leading-tight">
+                        {u.last_name ? `${u.last_name}, ${u.first_name}` : (u.full_name || 'Unnamed User')}
+                      </h4>
+                      <p className="text-xs text-gray-400 truncate mt-0.5">{u.email}</p>
+                    </div>
+                  </div>
+
+                  {u.role === 'parent' ? (
+                    <div className="bg-amber-50/50 border border-amber-100/50 rounded-2xl p-4 mb-4">
+                      <div className="flex items-center space-x-2 text-amber-700 mb-2">
+                        <Users className="w-4 h-4" />
+                        <span className="text-xs font-bold uppercase tracking-wider">Parent Account</span>
                       </div>
-                    </td>
-                    <td className="px-6 py-4"><StatusBadge isActive={u.is_active} /></td>
-                    <td className="px-6 py-4" onClick={e => e.stopPropagation()}>
-                      <div className="flex items-center justify-end space-x-1">
-                        <button onClick={() => setViewUser(u)} className="p-1.5 text-gray-400 hover:text-emerald-600 hover:bg-emerald-50 rounded-lg transition-colors" title="View"><Eye className="w-4 h-4" /></button>
-                        <button onClick={() => openEditModal(u)} className="p-1.5 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors" title="Edit"><Pencil className="w-4 h-4" /></button>
-                        <div className="relative">
-                          <button onClick={() => setOpenMenuId(openMenuId === u.id ? null : u.id)} className="p-1.5 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-lg transition-colors">
-                            <MoreVertical className="w-4 h-4" />
-                          </button>
-                          {openMenuId === u.id && (
-                            <div className="absolute right-0 mt-1 w-44 bg-white rounded-xl shadow-lg border border-gray-100 z-10 overflow-hidden">
-                              <button onClick={() => { setActionModal({ type: 'toggle', user: u }); setOpenMenuId(null); }}
-                                className={`w-full flex items-center space-x-2 px-4 py-2.5 text-sm text-left transition-colors ${u.is_active ? 'text-red-600 hover:bg-red-50' : 'text-emerald-600 hover:bg-emerald-50'}`}>
-                                {u.is_active ? <UserX className="w-4 h-4" /> : <UserCheck className="w-4 h-4" />}
-                                <span>{u.is_active ? 'Deactivate' : 'Activate'}</span>
-                              </button>
-                            </div>
-                          )}
+                      <div className="space-y-2">
+                         <div className="flex items-center justify-between text-xs text-amber-600">
+                           <span className="opacity-70">Associated Student</span>
+                           <span className="font-bold">Linked Account</span>
+                         </div>
+                         <div className="p-2.5 bg-white rounded-xl border border-amber-100 shadow-sm">
+                           <p className="text-xs font-bold text-gray-800">Child Information</p>
+                           <p className="text-[10px] text-gray-500 mt-0.5">Contact via {u.phone_number || 'email'}</p>
+                         </div>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-2 gap-3 mb-4">
+                      <div className="bg-gray-50 rounded-2xl p-3 border border-gray-100">
+                        <p className="text-[10px] text-gray-400 font-bold uppercase tracking-widest mb-1">Status</p>
+                        <div className="flex items-center space-x-1.5">
+                           <div className={`w-2 h-2 rounded-full ${u.is_active ? 'bg-green-500 animate-pulse' : 'bg-gray-400'}`}></div>
+                           <span className={`text-xs font-bold ${u.is_active ? 'text-green-700' : 'text-gray-500'}`}>{u.is_active ? 'Active' : 'Offline'}</span>
                         </div>
                       </div>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+                      <div className="bg-gray-50 rounded-2xl p-3 border border-gray-100">
+                        <p className="text-[10px] text-gray-400 font-bold uppercase tracking-widest mb-1">Member Since</p>
+                        <span className="text-xs font-bold text-gray-700 truncate block">
+                          {u.created_at ? new Date(u.created_at).toLocaleDateString('en-US', { month: 'short', year: 'numeric' }) : '—'}
+                        </span>
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="space-y-2.5">
+                    {u.student_number && (
+                      <div className="flex items-center text-xs text-gray-500">
+                        <Hash className="w-3.5 h-3.5 mr-2 text-emerald-500" />
+                        <span className="font-medium mr-1">ID:</span>
+                        <span className="font-bold text-gray-700">{u.student_number}</span>
+                      </div>
+                    )}
+                    {u.phone_number && (
+                      <div className="flex items-center text-xs text-gray-500">
+                        <Phone className="w-3.5 h-3.5 mr-2 text-emerald-500" />
+                        <span className="font-bold text-gray-700">{u.phone_number}</span>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                <div className="mt-auto border-t border-gray-50 px-6 py-4 bg-gray-50/30 flex items-center justify-between">
+                  <button 
+                    onClick={() => openEditModal(u)}
+                    className="flex-1 py-2 px-4 rounded-xl text-blue-600 font-bold text-xs hover:bg-blue-50 transition-colors flex items-center justify-center space-x-2 border border-transparent hover:border-blue-100"
+                  >
+                    <Pencil className="w-3.5 h-3.5" />
+                    <span>Manage Account</span>
+                  </button>
+                </div>
+              </div>
+            ))}
           </div>
         )}
       </div>
+
+      {/* Pagination */}
+      {currentListUsers.length > USERS_PER_PAGE && (
+        <div className="flex items-center justify-between px-6 py-4 bg-white rounded-3xl border border-gray-100 shadow-sm">
+          <p className="text-xs font-bold text-gray-400 uppercase tracking-widest">
+            Page <span className="text-emerald-600">{usersPage}</span> of {totalUserPages}
+          </p>
+          <div className="flex items-center space-x-2">
+            <button
+              onClick={() => setUsersPage(p => Math.max(1, p - 1))}
+              disabled={usersPage === 1}
+              className="p-2 border border-gray-100 rounded-xl disabled:opacity-30 hover:bg-gray-50 transition-all shadow-sm"
+            >
+              <ChevronDown className="w-5 h-5 rotate-90" />
+            </button>
+            <div className="flex items-center space-x-1">
+              {Array.from({ length: totalUserPages }, (_, i) => i + 1).slice(Math.max(0, usersPage - 3), usersPage + 2).map(p => (
+                <button
+                  key={p}
+                  onClick={() => setUsersPage(p)}
+                  className={`w-10 h-10 text-xs font-bold rounded-xl transition-all ${
+                    p === usersPage ? 'bg-emerald-600 text-white shadow-lg shadow-emerald-200 ring-4 ring-emerald-50' : 'text-gray-400 hover:text-gray-600 hover:bg-gray-50'
+                  }`}
+                >{p}</button>
+              ))}
+            </div>
+            <button
+              onClick={() => setUsersPage(p => Math.min(totalUserPages, p + 1))}
+              disabled={usersPage === totalUserPages}
+              className="p-2 border border-gray-100 rounded-xl disabled:opacity-30 hover:bg-gray-50 transition-all shadow-sm"
+            >
+              <ChevronDown className="w-5 h-5 -rotate-90" />
+            </button>
+          </div>
+        </div>
+      )}
       </>
       )}
+
+
 
       {/* ── PENDING SIGNUPS VIEW ── */}
       {activeView === 'pending' && (
@@ -595,7 +998,7 @@ const UserManagement = () => {
               {pendingSignups.map(u => (
                 <div key={u.id} onClick={() => setViewPending(u)} className="bg-white border border-amber-100 rounded-2xl p-4 shadow-sm flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 cursor-pointer hover:border-amber-300 hover:shadow-md transition-all">
                   <div className="space-y-1">
-                    <p className="font-semibold text-gray-900">{u.full_name || <span className="text-gray-400 italic">No name</span>}</p>
+                    <p className="font-semibold text-gray-900">{u.last_name ? `${u.last_name}, ${u.first_name} ${u.middle_initial || ''}` : <span className="text-gray-400 italic">No name</span>}</p>
                     <p className="text-sm text-gray-500">{u.email}</p>
                     <div className="flex flex-wrap gap-2 text-xs text-gray-400">
                       {u.role && <span className="capitalize bg-amber-50 text-amber-700 px-2 py-0.5 rounded-full font-medium">{u.role}</span>}
@@ -608,6 +1011,70 @@ const UserManagement = () => {
                   <div className="flex items-center text-amber-500 text-sm font-medium flex-shrink-0">
                     <span>View Details</span>
                     <ChevronRight className="w-4 h-4 ml-1" />
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── PARENT-STUDENT LINKING REQUESTS VIEW ── */}
+      {activeView === 'pending-links' && (
+        <div className="space-y-4">
+          {linksLoading ? (
+            <div className="text-center py-12 text-gray-400">Loading link requests...</div>
+          ) : pendingLinks.length === 0 ? (
+            <div className="text-center py-16">
+              <Users className="w-12 h-12 text-amber-300 mx-auto mb-3" />
+              <p className="text-gray-500 font-medium">No pending link requests</p>
+              <p className="text-gray-400 text-sm">All parent-student links have been reviewed.</p>
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              {pendingLinks.map(link => (
+                <div key={link.id} className="bg-white border border-amber-100 rounded-3xl p-6 shadow-sm hover:shadow-md transition-all space-y-4">
+                  <div className="flex items-start justify-between">
+                    <div className="flex items-center space-x-3">
+                      <div className="w-10 h-10 bg-amber-100 rounded-xl flex items-center justify-center">
+                        <Users className="w-5 h-5 text-amber-600" />
+                      </div>
+                      <div>
+                        <h4 className="font-bold text-gray-900">Link Request</h4>
+                        <p className="text-xs text-gray-400 font-medium">{new Date(link.created_at).toLocaleString()}</p>
+                      </div>
+                    </div>
+                    <span className="px-2.5 py-1 bg-amber-50 text-amber-600 rounded-full text-[10px] font-bold uppercase tracking-wider">Pending Approval</span>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-4 py-2">
+                    <div className="p-3 bg-gray-50 rounded-2xl border border-gray-100">
+                      <p className="text-[10px] text-gray-400 font-bold uppercase tracking-widest mb-1">Parent</p>
+                      <p className="text-sm font-bold text-gray-800 truncate">{link.parent?.first_name} {link.parent?.last_name}</p>
+                      <p className="text-[10px] text-gray-500 truncate">{link.parent?.email}</p>
+                    </div>
+                    <div className="p-3 bg-emerald-50 rounded-2xl border border-emerald-100">
+                      <p className="text-[10px] text-emerald-400 font-bold uppercase tracking-widest mb-1">Child (Student)</p>
+                      <p className="text-sm font-bold text-emerald-800 truncate">{link.student?.first_name} {link.student?.last_name}</p>
+                      <p className="text-[10px] text-emerald-600 truncate">ID: {link.student?.student_number}</p>
+                    </div>
+                  </div>
+
+                  <div className="flex space-x-3">
+                    <button 
+                      onClick={() => handleLinkAction(link.id, 'approved')}
+                      className="flex-1 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs transition-colors flex items-center justify-center space-x-1.5"
+                    >
+                      <CheckCircle className="w-3.5 h-3.5" />
+                      <span>Approve</span>
+                    </button>
+                    <button 
+                      onClick={() => handleLinkAction(link.id, 'declined')}
+                      className="flex-1 py-2 rounded-xl bg-red-50 hover:bg-red-100 text-red-600 font-bold text-xs transition-colors flex items-center justify-center space-x-1.5"
+                    >
+                      <XCircle className="w-3.5 h-3.5" />
+                      <span>Decline</span>
+                    </button>
                   </div>
                 </div>
               ))}
@@ -637,27 +1104,9 @@ const UserManagement = () => {
             </div>
 
             <form onSubmit={handleAddSubmit} className="p-6 space-y-4">
-              {/* Full Name */}
-              <FormField label="Full Name" icon={User}>
-                <input type="text" value={addForm.full_name} onChange={e => setAddForm({ ...addForm, full_name: e.target.value })}
-                  className={inputCls()} placeholder="Juan Dela Cruz" required />
-              </FormField>
-
-              {/* Email */}
-              <FormField label="Email Address" icon={Mail}>
-                <input type="email" value={addForm.email} onChange={e => setAddForm({ ...addForm, email: e.target.value })}
-                  className={inputCls()} placeholder="user@example.com" required />
-              </FormField>
-
-              {/* Temporary Password */}
-              <FormField label="Temporary Password" icon={Lock}>
-                <input type="text" value={addForm.password} onChange={e => setAddForm({ ...addForm, password: e.target.value })}
-                  className={inputCls()} placeholder="Min. 6 characters" required />
-              </FormField>
-
-              {/* Role */}
+              {/* Role First */}
               <div>
-                <label className="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5">Role</label>
+                <label className="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5">User Role</label>
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
                   {[
                     { value: 'student',  label: 'Student',  icon: GraduationCap },
@@ -666,13 +1115,56 @@ const UserManagement = () => {
                     { value: 'co-admin', label: 'Co-Admin', icon: UserCheck },
                   ].map(({ value, label, icon: Icon }) => (
                     <button key={value} type="button" onClick={() => setAddForm({ ...addForm, role: value })}
-                      className={`p-3 rounded-xl border-2 transition-all text-center ${addForm.role === value ? 'border-emerald-500 bg-emerald-50' : 'border-gray-200 hover:border-gray-300'}`}>
-                      <Icon className={`w-4 h-4 mx-auto mb-1 ${addForm.role === value ? 'text-emerald-600' : 'text-gray-400'}`} />
-                      <p className={`text-xs font-semibold ${addForm.role === value ? 'text-emerald-700' : 'text-gray-600'}`}>{label}</p>
+                      className={`p-3 rounded-xl border-2 transition-all text-center ${addForm.role === value ? 'border-emerald-500 bg-emerald-50 shadow-sm ring-1 ring-emerald-500' : 'border-gray-200 hover:border-gray-300'}`}>
+                      <Icon className={`w-5 h-5 mx-auto mb-1 ${addForm.role === value ? 'text-emerald-600' : 'text-gray-400'}`} />
+                      <p className={`text-xs font-bold leading-tight ${addForm.role === value ? 'text-emerald-700' : 'text-gray-600'}`}>{label}</p>
                     </button>
                   ))}
                 </div>
               </div>
+
+              {/* Atomic Names */}
+              <div className="grid grid-cols-5 gap-3">
+                <div className="col-span-2">
+                  <FormField label="First Name" icon={User}>
+                    <input type="text" value={addForm.first_name} onChange={e => setAddForm({ ...addForm, first_name: e.target.value })}
+                      className="w-full pl-10 pr-4 py-2.5 border border-gray-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400 focus:border-transparent bg-gray-50" 
+                      placeholder="Juan" required />
+                  </FormField>
+                </div>
+                <div className="col-span-2">
+                  <FormField label="Last Name">
+                    <input type="text" value={addForm.last_name} onChange={e => setAddForm({ ...addForm, last_name: e.target.value })}
+                      className="w-full px-4 py-2.5 border border-gray-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400 focus:border-transparent bg-gray-50" 
+                      placeholder="Dela Cruz" required />
+                  </FormField>
+                </div>
+                <div className="col-span-1">
+                  <FormField label="M.I.">
+                    <input type="text" value={addForm.middle_initial} onChange={e => setAddForm({ ...addForm, middle_initial: e.target.value })}
+                      className="w-full px-4 py-2.5 border border-gray-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400 focus:border-transparent bg-gray-50 text-center" 
+                      placeholder="D" maxLength={2} />
+                  </FormField>
+                </div>
+              </div>
+
+              {/* Email & Avatar */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <FormField label="Email Address" icon={Mail}>
+                  <input type="email" value={addForm.email} onChange={e => setAddForm({ ...addForm, email: e.target.value })}
+                    className={inputCls()} placeholder="user@example.com" required />
+                </FormField>
+                <FormField label="Profile Picture (URL)" icon={User}>
+                  <input type="url" value={addForm.avatar_url || ''} onChange={e => setAddForm({ ...addForm, avatar_url: e.target.value })}
+                    className={inputCls()} placeholder="https://..." />
+                </FormField>
+              </div>
+
+              {/* Temporary Password */}
+              <FormField label="Temporary Password" icon={Lock}>
+                <input type="text" value={addForm.password} onChange={e => setAddForm({ ...addForm, password: e.target.value })}
+                  className={inputCls()} placeholder="Min. 6 characters" required />
+              </FormField>
 
               {/* Phone */}
               <FormField label="Phone Number" icon={Phone}>
@@ -693,6 +1185,35 @@ const UserManagement = () => {
                       className="w-full px-4 py-2.5 border border-gray-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400 bg-gray-50">
                       {YEAR_LEVELS.map(y => <option key={y} value={y}>{y}</option>)}
                     </select>
+                  </div>
+                </div>
+              )}
+
+              {/* Parent-specific fields */}
+              {addForm.role === 'parent' && (
+                <div className="space-y-3 p-4 bg-amber-50 rounded-2xl border border-amber-100">
+                  <div className="flex items-center justify-between">
+                    <label className="text-xs font-bold text-amber-700 uppercase tracking-widest">Linked Children</label>
+                    <button type="button" onClick={() => addStudentField(false)}
+                      className="text-[10px] font-bold text-amber-600 bg-white px-2 py-1 rounded-lg border border-amber-200 hover:bg-amber-100 transition-colors flex items-center space-x-1">
+                      <Plus className="w-3 h-3" /><span>Add Child</span>
+                    </button>
+                  </div>
+                  <div className="space-y-2">
+                    {(addForm.parent_student_numbers || ['']).map((num, i) => (
+                      <div key={i} className="flex items-center space-x-2">
+                        <div className="relative flex-1">
+                          <Hash className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+                          <input type="text" value={num} onChange={e => handleStudentNumberChange(i, e.target.value, false)}
+                            className="w-full pl-9 pr-4 py-2 border border-gray-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-amber-400 bg-white" placeholder="Student Number" />
+                        </div>
+                        {addForm.parent_student_numbers.length > 1 && (
+                          <button type="button" onClick={() => removeStudentField(i, false)} className="p-2 text-red-500 hover:bg-red-50 rounded-lg transition-colors">
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        )}
+                      </div>
+                    ))}
                   </div>
                 </div>
               )}
@@ -737,7 +1258,7 @@ const UserManagement = () => {
                 <div className="w-10 h-10 bg-blue-100 rounded-xl flex items-center justify-center overflow-hidden">
                   {editUser.avatar_url
                     ? <img src={editUser.avatar_url} alt="" className="w-10 h-10 object-cover" />
-                    : <span className="text-blue-700 font-bold text-sm">{editUser.full_name?.split(' ').map(n => n[0]).join('').substring(0, 2)}</span>}
+                    : <span className="text-blue-700 font-bold text-sm">{(editUser.first_name?.[0] || '') + (editUser.last_name?.[0] || '')}</span>}
                 </div>
                 <div>
                   <h3 className="text-lg font-bold text-gray-900">Edit User</h3>
@@ -750,31 +1271,9 @@ const UserManagement = () => {
             </div>
 
             <form onSubmit={handleEditSubmit} className="p-6 space-y-4">
-              {/* Full Name */}
-              <FormField label="Full Name" icon={User}>
-                <input type="text" value={editForm.full_name} onChange={e => setEditForm({ ...editForm, full_name: e.target.value })}
-                  className={inputCls()} required />
-              </FormField>
-
-              {/* Email (read-only) */}
+              {/* Role First */}
               <div>
-                <label className="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5">Email Address</label>
-                <div className="relative">
-                  <Mail className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
-                  <input type="email" value={editUser.email} className={`${inputCls()} opacity-60 cursor-not-allowed`} disabled />
-                </div>
-                <p className="text-xs text-gray-400 mt-1">Email cannot be changed here.</p>
-              </div>
-
-              {/* Phone */}
-              <FormField label="Phone Number" icon={Phone}>
-                <input type="tel" value={editForm.phone_number} onChange={e => setEditForm({ ...editForm, phone_number: e.target.value })}
-                  className={inputCls()} placeholder="09123456789" />
-              </FormField>
-
-              {/* Role */}
-              <div>
-                <label className="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5">Role</label>
+                <label className="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5">User Role</label>
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
                   {[
                     { value: 'student',  label: 'Student',  icon: GraduationCap },
@@ -783,13 +1282,56 @@ const UserManagement = () => {
                     { value: 'co-admin', label: 'Co-Admin', icon: UserCheck },
                   ].map(({ value, label, icon: Icon }) => (
                     <button key={value} type="button" onClick={() => setEditForm({ ...editForm, role: value })}
-                      className={`p-3 rounded-xl border-2 transition-all text-center ${editForm.role === value ? 'border-emerald-500 bg-emerald-50' : 'border-gray-200 hover:border-gray-300'}`}>
-                      <Icon className={`w-4 h-4 mx-auto mb-1 ${editForm.role === value ? 'text-emerald-600' : 'text-gray-400'}`} />
-                      <p className={`text-xs font-semibold ${editForm.role === value ? 'text-emerald-700' : 'text-gray-600'}`}>{label}</p>
+                      className={`p-3 rounded-xl border-2 transition-all text-center ${editForm.role === value ? 'border-emerald-500 bg-emerald-50 shadow-sm ring-1 ring-emerald-500' : 'border-gray-200 hover:border-gray-300'}`}>
+                      <Icon className={`w-5 h-5 mx-auto mb-1 ${editForm.role === value ? 'text-emerald-600' : 'text-gray-400'}`} />
+                      <p className={`text-xs font-bold leading-tight ${editForm.role === value ? 'text-emerald-700' : 'text-gray-600'}`}>{label}</p>
                     </button>
                   ))}
                 </div>
               </div>
+
+              {/* Atomic Names */}
+              <div className="grid grid-cols-5 gap-3">
+                <div className="col-span-2">
+                  <FormField label="First Name" icon={User}>
+                    <input type="text" value={editForm.first_name} onChange={e => setEditForm({ ...editForm, first_name: e.target.value })}
+                      className="w-full pl-10 pr-4 py-2.5 border border-gray-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400 focus:border-transparent bg-gray-50" required />
+                  </FormField>
+                </div>
+                <div className="col-span-2">
+                  <FormField label="Last Name">
+                    <input type="text" value={editForm.last_name} onChange={e => setEditForm({ ...editForm, last_name: e.target.value })}
+                      className="w-full px-4 py-2.5 border border-gray-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400 focus:border-transparent bg-gray-50" required />
+                  </FormField>
+                </div>
+                <div className="col-span-1">
+                  <FormField label="M.I.">
+                    <input type="text" value={editForm.middle_initial} onChange={e => setEditForm({ ...editForm, middle_initial: e.target.value })}
+                      className="w-full px-4 py-2.5 border border-gray-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400 focus:border-transparent bg-gray-50 text-center" maxLength={2} />
+                  </FormField>
+                </div>
+              </div>
+
+              {/* Email & Avatar */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5">Email Address</label>
+                  <div className="relative">
+                    <Mail className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+                    <input type="email" value={editUser.email} className={`${inputCls()} opacity-60 cursor-not-allowed`} disabled />
+                  </div>
+                </div>
+                <FormField label="Profile Picture (URL)" icon={User}>
+                  <input type="url" value={editForm.avatar_url || ''} onChange={e => setEditForm({ ...editForm, avatar_url: e.target.value })}
+                    className={inputCls()} placeholder="https://..." />
+                </FormField>
+              </div>
+
+              {/* Phone */}
+              <FormField label="Phone Number" icon={Phone}>
+                <input type="tel" value={editForm.phone_number} onChange={e => setEditForm({ ...editForm, phone_number: e.target.value })}
+                  className={inputCls()} placeholder="09123456789" />
+              </FormField>
 
               {/* Student-specific */}
               {editForm.role === 'student' && (
@@ -808,15 +1350,44 @@ const UserManagement = () => {
                 </div>
               )}
 
+              {/* Parent-specific edit */}
+              {editForm.role === 'parent' && (
+                <div className="space-y-3 p-4 bg-amber-50 rounded-2xl border border-amber-100">
+                  <div className="flex items-center justify-between">
+                    <label className="text-xs font-bold text-amber-700 uppercase tracking-widest">Linked Children</label>
+                    <button type="button" onClick={() => addStudentField(true)}
+                      className="text-[10px] font-bold text-amber-600 bg-white px-2 py-1 rounded-lg border border-amber-200 hover:bg-amber-100 transition-colors flex items-center space-x-1">
+                      <Plus className="w-3 h-3" /><span>Add Child</span>
+                    </button>
+                  </div>
+                  <div className="space-y-2">
+                    {(editForm.parent_student_numbers || ['']).map((num, i) => (
+                      <div key={i} className="flex items-center space-x-2">
+                        <div className="relative flex-1">
+                          <Hash className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+                          <input type="text" value={num} onChange={e => handleStudentNumberChange(i, e.target.value, true)}
+                            className="w-full pl-9 pr-4 py-2 border border-gray-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-amber-400 bg-white" placeholder="Student Number" />
+                        </div>
+                        {editForm.parent_student_numbers.length > 1 && (
+                          <button type="button" onClick={() => removeStudentField(i, true)} className="p-2 text-red-500 hover:bg-red-50 rounded-lg transition-colors">
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               {/* Active toggle */}
-              <div className="flex items-center justify-between p-3 bg-gray-50 rounded-xl border border-gray-200">
+              <div className="flex items-center justify-between p-4 bg-gray-50 rounded-3xl border border-gray-100">
                 <div>
-                  <p className="text-sm font-semibold text-gray-800">Account Status</p>
-                  <p className="text-xs text-gray-500">{editForm.is_active ? 'User can access the system' : 'User is blocked from the system'}</p>
+                  <p className="text-sm font-bold text-gray-800">Account Status</p>
+                  <p className="text-xs text-gray-400 mt-0.5">{editForm.is_active ? 'This user has full access' : 'This user is currently suspended'}</p>
                 </div>
                 <button type="button" onClick={() => setEditForm({ ...editForm, is_active: !editForm.is_active })}
-                  className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${editForm.is_active ? 'bg-emerald-600' : 'bg-gray-300'}`}>
-                  <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform shadow ${editForm.is_active ? 'translate-x-6' : 'translate-x-1'}`} />
+                  className={`relative inline-flex h-7 w-12 items-center rounded-full transition-all ring-4 ring-offset-2 ${editForm.is_active ? 'bg-emerald-600 ring-emerald-50' : 'bg-gray-300 ring-gray-100'}`}>
+                  <span className={`inline-block h-5 w-5 transform rounded-full bg-white transition-transform shadow-lg ${editForm.is_active ? 'translate-x-6' : 'translate-x-1'}`} />
                 </button>
               </div>
 
@@ -859,10 +1430,10 @@ const UserManagement = () => {
                 <div className="w-16 h-16 rounded-full bg-white/20 flex items-center justify-center text-2xl font-bold shadow-lg overflow-hidden">
                   {viewUser.avatar_url
                     ? <img src={viewUser.avatar_url} alt="" className="w-16 h-16 object-cover" />
-                    : viewUser.full_name?.split(' ').map(n => n[0]).join('').substring(0, 2) || '?'}
+                    : (viewUser.first_name?.[0] || '') + (viewUser.last_name?.[0] || '')}
                 </div>
                 <div>
-                  <h3 className="text-xl font-bold">{viewUser.full_name}</h3>
+                  <h3 className="text-xl font-bold">{viewUser.first_name} {viewUser.last_name}</h3>
                   <p className="text-emerald-100 text-sm">{viewUser.email}</p>
                 </div>
               </div>
@@ -912,7 +1483,7 @@ const UserManagement = () => {
             <h3 className="text-lg font-bold text-gray-900 mb-2">{actionModal.user.is_active ? 'Deactivate User?' : 'Activate User?'}</h3>
             <p className="text-sm text-gray-500 mb-6">
               Are you sure you want to {actionModal.user.is_active ? 'deactivate' : 'activate'}{' '}
-              <span className="font-semibold text-gray-800">{actionModal.user.full_name}</span>?
+              <span className="font-semibold text-gray-800">{actionModal.user.first_name} {actionModal.user.last_name}</span>?
               {actionModal.user.is_active && ' They will no longer be able to access the system.'}
             </p>
             <div className="flex space-x-3">
@@ -938,7 +1509,7 @@ const UserManagement = () => {
               </div>
               <div>
                 <h3 className="font-bold text-gray-900">Decline Registration</h3>
-                <p className="text-sm text-gray-500">{declineModal.full_name}</p>
+                <p className="text-sm text-gray-500">{declineModal.first_name} {declineModal.last_name}</p>
               </div>
             </div>
             <label className="block text-sm font-medium text-gray-700 mb-2">Reason for declining</label>
@@ -975,11 +1546,11 @@ const UserManagement = () => {
               <div className="flex items-center space-x-3">
                 <div className="w-11 h-11 rounded-full bg-white/20 flex items-center justify-center">
                   <span className="text-white font-bold text-sm">
-                    {viewPending.full_name?.split(' ').map(n => n[0]).join('').substring(0, 2) || '?'}
+                    {(viewPending.first_name?.[0] || '') + (viewPending.last_name?.[0] || '')}
                   </span>
                 </div>
                 <div>
-                  <p className="font-bold text-white">{viewPending.full_name || 'Unknown'}</p>
+                  <p className="font-bold text-white">{viewPending.first_name} {viewPending.last_name}</p>
                   <p className="text-amber-100 text-xs">Pending Registration</p>
                 </div>
               </div>
@@ -1005,6 +1576,33 @@ const UserManagement = () => {
                   </div>
                 </div>
               ))}
+
+              {/* Children List for Parents */}
+              {viewPending.role === 'parent' && (
+                <div className="p-4 bg-amber-50 rounded-2xl border border-amber-100 space-y-3">
+                  <p className="text-xs font-bold text-amber-700 uppercase tracking-widest">Requested Children</p>
+                  <div className="space-y-2">
+                    {(() => {
+                      let nums = [];
+                      try {
+                        const parsed = JSON.parse(viewPending.student_number);
+                        if (Array.isArray(parsed)) nums = parsed;
+                        else nums = [viewPending.student_number];
+                      } catch(e) { nums = [viewPending.student_number]; }
+                      
+                      return nums.filter(n => n).map((n, i) => (
+                        <div key={i} className="flex items-center justify-between text-sm p-2 bg-white rounded-xl border border-amber-100 shadow-sm">
+                          <div className="flex items-center space-x-2">
+                            <Hash className="w-3.5 h-3.5 text-amber-400" />
+                            <span className="font-bold text-gray-700">{n}</span>
+                          </div>
+                          <span className="text-xs text-gray-500 font-medium">{pendingChildDetails[n] || 'Finding name...'}</span>
+                        </div>
+                      ));
+                    })()}
+                  </div>
+                </div>
+              )}
             </div>
             {/* Actions */}
             <div className="px-6 pb-6 flex space-x-3">
@@ -1036,7 +1634,7 @@ const UserManagement = () => {
               <h3 className="text-white font-bold text-lg">Approve Student?</h3>
             </div>
             <div className="p-6 text-center">
-              <p className="text-gray-700 font-medium mb-1">{confirmApprove.full_name || confirmApprove.email}</p>
+              <p className="text-gray-700 font-medium mb-1">{confirmApprove.first_name} {confirmApprove.last_name}</p>
               <p className="text-gray-500 text-sm mb-6">
                 Do you want to approve this student? A confirmation link will be sent to their email.
               </p>

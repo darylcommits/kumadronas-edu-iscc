@@ -4,6 +4,7 @@
 // 3. Fixed admin notifications
 import React, { useState, useEffect } from 'react';
 import { supabase, dbHelpers } from '../lib/supabase';
+import { sendSmsNotification, sendEmailNotification } from '../lib/externalNotifications';
 import {
   Chart as ChartJS,
   CategoryScale,
@@ -51,7 +52,10 @@ import {
   Trash2,
   Award,
   Filter,
-  AlertTriangle
+  AlertTriangle,
+  MapPin,
+  Send,
+  Hash
 } from 'lucide-react';
 
 ChartJS.register(
@@ -79,6 +83,7 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
   const [studentDuties, setStudentDuties] = useState([]);
   const [childDuties, setChildDuties] = useState([]);
   const [dashboardStats, setDashboardStats] = useState({});
+  const [childName, setChildName] = useState('');
   const [chartData, setChartData] = useState({
     locationDistribution: {},
     bookingTrends: {},
@@ -96,8 +101,25 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
   const [approveAllToConfirm, setApproveAllToConfirm] = useState(null); // { scheduleId, studentCount }
   // FIXED: Add state for system logs
   const [systemLogs, setSystemLogs] = useState([]);
+  const [systemLogsPage, setSystemLogsPage] = useState(1);
+  const [totalLogsCount, setTotalLogsCount] = useState(0);
+  const LOGS_PER_PAGE = 10;
+  const ADMIN_LOG_ACTIONS = [
+    'approved', 'approved_individual', 'approved_all', 'approved_schedule',
+    'rejected', 'rejected_individual', 'rejected_all', 'rejected_schedule',
+    'deactivated', 'activated', 'created', 'user_created', 'user_updated',
+    'user_activated', 'user_deactivated', 'registration_approved',
+    'registration_declined', 'schedule_created', 'schedule_updated', 'schedule_deleted'
+  ];
   const [showDutyDetailsModal, setShowDutyDetailsModal] = useState(false);
   const [selectedDuty, setSelectedDuty] = useState(null);
+  const [bookingStatus, setBookingStatus] = useState('open');
+  const [hospitalLocations, setHospitalLocations] = useState([]);
+  // Multi-child states for parents
+  const [linkedChildren, setLinkedChildren] = useState([]);
+  const [selectedChildId, setSelectedChildId] = useState(null);
+  const [linkStudentNumber, setLinkStudentNumber] = useState('');
+  const [isRequestingLink, setIsRequestingLink] = useState(false);
 
   // Role helper — co-admin has the same access as admin
   const isAdmin = user?.role === 'admin' || user?.role === 'co-admin';
@@ -162,11 +184,23 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
       )
       .subscribe();
 
+    const systemSettingsChannel = supabase
+      .channel('system_settings')
+      .on('postgres_changes',
+        { event: '*', schema: 'public', table: 'system_settings' },
+        () => {
+          fetchBookingStatus();
+          fetchHospitalLocations();
+        }
+      )
+      .subscribe();
+
     return () => {
       supabase.removeChannel(notificationChannel);
       supabase.removeChannel(scheduleChannel);
       supabase.removeChannel(scheduleStudentsChannel);
       supabase.removeChannel(dutyLogsChannel);
+      supabase.removeChannel(systemSettingsChannel);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user]);
@@ -196,50 +230,67 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
       fetchDashboardStats(),
       fetchPendingBookings(),
       fetchChartData(),
+      fetchBookingStatus(),
+      fetchHospitalLocations(),
       user?.role === 'student' && fetchStudentDuties(),
-      user?.role === 'parent' && fetchChildDuties(),
+      user?.role === 'parent' && fetchLinkedChildren(),
       isAdmin && fetchSystemLogs(), // FIXED: Fetch system logs for admin
       isAdmin && fetchPendingCount()
     ]);
   };
 
-  // FIXED: Add function to fetch system logs from duty_logs table
-  const fetchSystemLogs = async () => {
+  const fetchBookingStatus = async () => {
     try {
-      console.log('Fetching system logs from duty_logs table...');
-      const { data, error } = await supabase
+      const { data, error } = await supabase.from('system_settings').select('value').eq('key', 'booking_system_status').single();
+      if (!error && data) setBookingStatus(data.value);
+    } catch (e) {
+      console.warn('Could not fetch booking status', e);
+    }
+  };
+
+  const fetchHospitalLocations = async () => {
+    try {
+      const { data, error } = await supabase.from('system_settings').select('value').eq('key', 'hospital_locations').single();
+      if (!error && data) setHospitalLocations(JSON.parse(data.value));
+    } catch (e) {
+      console.warn('Could not fetch locations', e);
+    }
+  };
+
+  // FIXED: Add function to fetch system logs from duty_logs table
+  const fetchSystemLogs = async (page = 1) => {
+    try {
+      console.log(`Fetching system logs (Page ${page}) from duty_logs table...`);
+      const from = (page - 1) * LOGS_PER_PAGE;
+      const to = from + LOGS_PER_PAGE - 1;
+
+      const { data, error, count } = await supabase
         .from('duty_logs')
         .select(`
           *,
           performed_by_profile:profiles!performed_by (
-            id,
-            full_name,
-            email
+            id, first_name, last_name, middle_initial, email
           ),
           target_user_profile:profiles!target_user (
-            id,
-            full_name,
-            email
+            id, first_name, last_name, middle_initial, email
           ),
           schedule_students (
             id,
             schedules (
-              date,
-              location,
-              description
+              date, location, description
             )
           )
-        `)
+        `, { count: 'exact' })
+        .in('action', ADMIN_LOG_ACTIONS)
         .order('created_at', { ascending: false })
-        .limit(100);
+        .range(from, to);
 
-      if (error) {
-        console.error('Error fetching system logs:', error);
-        return;
-      }
+      if (error) throw error;
 
-      console.log('System logs fetched:', data);
+      console.log('System logs fetched:', data, 'Total count:', count);
       setSystemLogs(data || []);
+      setTotalLogsCount(count || 0);
+      setSystemLogsPage(page);
     } catch (error) {
       console.error('Error fetching system logs:', error);
     }
@@ -247,14 +298,22 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
 
   const fetchChartData = async () => {
     try {
-      // Location distribution
-      const { data: locationData } = await supabase
-        .from('schedules')
-        .select('location')
-        .not('location', 'is', null);
+      // Location distribution - Fetch total active students per area
+      const { data: studentBookings } = await supabase
+        .from('schedule_students')
+        .select(`
+          status,
+          schedules (
+            location
+          )
+        `)
+        .neq('status', 'cancelled');
 
-      const locationCounts = locationData?.reduce((acc, curr) => {
-        acc[curr.location] = (acc[curr.location] || 0) + 1;
+      const locationCounts = studentBookings?.reduce((acc, curr) => {
+        const loc = curr.schedules?.location;
+        if (loc) {
+          acc[loc] = (acc[loc] || 0) + 1;
+        }
         return acc;
       }, {}) || {};
 
@@ -316,7 +375,9 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
             cancelled_at,
             profiles:student_id (
               id,
-              full_name,
+              first_name,
+              last_name,
+              middle_initial,
               email,
               student_number
             )
@@ -342,98 +403,165 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
     }
   };
 
-  // FIXED: System Logs View Component - now using actual duty_logs data
-  const renderSystemLogsView = () => (
-    <div className="space-y-6">
-      <div className="flex justify-between items-center">
-        <h2 className="text-2xl font-bold text-gray-900">System Logs</h2>
-        <div className="flex items-center space-x-3">
-          <button
-            onClick={fetchSystemLogs}
-            className="btn-secondary flex items-center space-x-2"
-          >
-            <Activity className="w-4 h-4" />
-            <span>Refresh</span>
-          </button>
-          <div className="text-sm text-gray-600">
-            Showing last 100 activities
+  // FIXED: System Logs View Component - now using server-side pagination & filtered data
+  const renderSystemLogsView = () => {
+    const totalPages = Math.max(1, Math.ceil(totalLogsCount / LOGS_PER_PAGE));
+    const pageStart = (systemLogsPage - 1) * LOGS_PER_PAGE;
+
+    return (
+      <div className="space-y-6">
+        <div className="flex justify-between items-center">
+          <h2 className="text-2xl font-bold text-gray-900">System Logs</h2>
+          <div className="flex items-center space-x-3">
+            <button
+              onClick={fetchSystemLogs}
+              className="btn-secondary flex items-center space-x-2"
+            >
+              <Activity className="w-4 h-4" />
+              <span>Refresh</span>
+            </button>
+            <div className="text-sm text-gray-600">
+              {totalLogsCount} admin action{totalLogsCount !== 1 ? 's' : ''}
+            </div>
           </div>
         </div>
-      </div>
 
-      <div className="card">
-        <div className="overflow-x-auto">
-          <table className="w-full">
-            <thead>
-              <tr className="border-b border-gray-200">
-                <th className="text-left p-3 text-xs font-medium text-gray-500 uppercase tracking-wider">Timestamp</th>
-                <th className="text-left p-3 text-xs font-medium text-gray-500 uppercase tracking-wider">Action</th>
-                <th className="text-left p-3 text-xs font-medium text-gray-500 uppercase tracking-wider">Performed By</th>
-                <th className="text-left p-3 text-xs font-medium text-gray-500 uppercase tracking-wider">Target User</th>
-                <th className="text-left p-3 text-xs font-medium text-gray-500 uppercase tracking-wider">Details</th>
-              </tr>
-            </thead>
-            <tbody>
-              {systemLogs.map((log) => (
-                <tr key={log.id} className="border-b border-gray-100 hover:bg-gray-50">
-                  <td className="p-3 text-sm text-gray-600">
-                    {new Date(log.created_at).toLocaleString()}
-                  </td>
-                  <td className="p-3">
-                    <span className={`inline-flex px-2 py-1 rounded-full text-xs font-medium ${log.action === 'login' ? 'bg-green-100 text-green-800' :
-                      log.action === 'logout' ? 'bg-gray-100 text-gray-800' :
-                        log.action === 'booked' ? 'bg-blue-100 text-blue-800' :
-                          log.action === 'approved' || log.action === 'approved_individual' || log.action === 'approved_all' ? 'bg-emerald-100 text-emerald-800' :
-                            log.action === 'rejected' || log.action === 'rejected_individual' || log.action === 'rejected_all' ? 'bg-red-100 text-red-800' :
-                              log.action === 'cancelled' ? 'bg-orange-100 text-orange-800' :
-                                'bg-yellow-100 text-yellow-800'
-                      }`}>
-                      {log.action.replace(/_/g, ' ').toUpperCase()}
-                    </span>
-                  </td>
-                  <td className="p-3 text-sm">
-                    <div>
-                      <div className="font-medium text-gray-900">{log.performed_by_profile?.full_name || 'System'}</div>
-                      <div className="text-gray-500 text-xs">{log.performed_by_profile?.email || 'N/A'}</div>
-                    </div>
-                  </td>
-                  <td className="p-3 text-sm">
-                    {log.target_user_profile ? (
-                      <div>
-                        <div className="font-medium text-gray-900">{log.target_user_profile.full_name}</div>
-                        <div className="text-gray-500 text-xs">{log.target_user_profile.email}</div>
-                      </div>
-                    ) : (
-                      <span className="text-gray-400">N/A</span>
-                    )}
-                  </td>
-                  <td className="p-3 text-sm text-gray-700">
-                    <div className="max-w-xs">
-                      <div className="truncate">{log.notes}</div>
-                      {log.schedule_students?.[0]?.schedules && (
-                        <div className="text-xs text-gray-500 mt-1">
-                          📅 {new Date(log.schedule_students[0].schedules.date).toLocaleDateString()}
-                          {log.schedule_students[0].schedules.location && ` • ${log.schedule_students[0].schedules.location}`}
-                        </div>
-                      )}
-                    </div>
-                  </td>
+        <div className="card">
+          <div className="overflow-x-auto">
+            <table className="w-full">
+              <thead>
+                <tr className="border-b border-gray-200">
+                  <th className="text-left p-3 text-xs font-medium text-gray-500 uppercase tracking-wider">Timestamp</th>
+                  <th className="text-left p-3 text-xs font-medium text-gray-500 uppercase tracking-wider">Action</th>
+                  <th className="text-left p-3 text-xs font-medium text-gray-500 uppercase tracking-wider">Performed By</th>
+                  <th className="text-left p-3 text-xs font-medium text-gray-500 uppercase tracking-wider">Target User</th>
+                  <th className="text-left p-3 text-xs font-medium text-gray-500 uppercase tracking-wider">Details</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-
-        {systemLogs.length === 0 && (
-          <div className="text-center py-12">
-            <Activity className="w-16 h-16 mx-auto mb-4 text-gray-300" />
-            <h3 className="text-lg font-medium text-gray-900 mb-2">No system logs yet</h3>
-            <p className="text-gray-600">System activities will appear here as they occur.</p>
+              </thead>
+              <tbody>
+                {systemLogs.map((log) => (
+                  <tr key={log.id} className="border-b border-gray-100 hover:bg-gray-50">
+                    <td className="p-3 text-sm text-gray-600">
+                      {new Date(log.created_at).toLocaleString()}
+                    </td>
+                    <td className="p-3">
+                      <span className={`inline-flex px-2 py-1 rounded-full text-xs font-medium ${log.action === 'approved' || log.action === 'approved_individual' || log.action === 'approved_all' ? 'bg-emerald-100 text-emerald-800' :
+                        log.action === 'rejected' || log.action === 'rejected_individual' || log.action === 'rejected_all' ? 'bg-red-100 text-red-800' :
+                          'bg-yellow-100 text-yellow-800'
+                        }`}>
+                        {log.action.replace(/_/g, ' ').toUpperCase()}
+                      </span>
+                    </td>
+                    <td className="p-3 text-sm">
+                      <div>
+                        <div className="font-medium text-gray-900">
+                          {log.performed_by_profile ? `${log.performed_by_profile.first_name} ${log.performed_by_profile.last_name}` : 'System'}
+                        </div>
+                        <div className="text-gray-500 text-xs">{log.performed_by_profile?.email || 'N/A'}</div>
+                      </div>
+                    </td>
+                    <td className="p-3 text-sm">
+                      {log.target_user_profile ? (
+                        <div>
+                          <div className="font-medium text-gray-900">
+                            {log.target_user_profile.first_name} {log.target_user_profile.last_name}
+                          </div>
+                          <div className="text-gray-500 text-xs">{log.target_user_profile.email}</div>
+                        </div>
+                      ) : (
+                        <span className="text-gray-400">N/A</span>
+                      )}
+                    </td>
+                    <td className="p-3 text-sm text-gray-700">
+                      <div className="max-w-xs">
+                        <div className="truncate">{log.notes}</div>
+                        {log.schedule_students?.[0]?.schedules && (
+                          <div className="text-xs text-gray-500 mt-1">
+                            📅 {new Date(log.schedule_students[0].schedules.date).toLocaleDateString()}
+                            {log.schedule_students[0].schedules.location && ` • ${log.schedule_students[0].schedules.location}`}
+                          </div>
+                        )}
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
-        )}
+
+          {systemLogs.length === 0 && (
+            <div className="text-center py-12">
+              <Activity className="w-16 h-16 mx-auto mb-4 text-gray-300" />
+              <h3 className="text-lg font-medium text-gray-900 mb-2">No admin actions found</h3>
+              <p className="text-gray-600">Administrative activity will appear here once performed.</p>
+            </div>
+          )}
+
+          {totalLogsCount > LOGS_PER_PAGE && (
+            <div className="flex items-center justify-between px-4 py-3 border-t border-gray-100 mt-2">
+              <p className="text-sm text-gray-500">
+                Showing {pageStart + 1}–{Math.min(pageStart + LOGS_PER_PAGE, totalLogsCount)} of {totalLogsCount}
+              </p>
+              <div className="flex items-center space-x-1">
+                <button
+                  onClick={() => fetchSystemLogs(Math.max(1, systemLogsPage - 1))}
+                  disabled={systemLogsPage === 1}
+                  className="px-3 py-1.5 text-sm border border-gray-200 rounded-lg disabled:opacity-40 hover:bg-gray-50 transition-colors"
+                >
+                  ← Prev
+                </button>
+
+                {/* Pagination context or condensed page dots for many pages */}
+                {totalPages <= 8 ? (
+                  Array.from({ length: totalPages }, (_, i) => i + 1).map(p => (
+                    <button
+                      key={p}
+                      onClick={() => fetchSystemLogs(p)}
+                      className={`px-3 py-1.5 text-sm border rounded-lg transition-colors ${p === systemLogsPage ? 'bg-emerald-600 text-white border-emerald-600' : 'border-gray-200 hover:bg-gray-50'
+                        }`}
+                    >{p}</button>
+                  ))
+                ) : (
+                  <>
+                    <button
+                      onClick={() => fetchSystemLogs(1)}
+                      className={`px-3 py-1.5 text-sm border rounded-lg ${systemLogsPage === 1 ? 'bg-emerald-600 text-white' : 'border-gray-200'}`}
+                    >1</button>
+                    {systemLogsPage > 3 && <span className="px-2 text-gray-400">...</span>}
+
+                    {Array.from({ length: 3 }, (_, i) => systemLogsPage - 1 + i)
+                      .filter(p => p > 1 && p < totalPages)
+                      .map(p => (
+                        <button
+                          key={p}
+                          onClick={() => fetchSystemLogs(p)}
+                          className={`px-3 py-1.5 text-sm border rounded-lg ${p === systemLogsPage ? 'bg-emerald-600 text-white' : 'border-gray-200'}`}
+                        >{p}</button>
+                      ))
+                    }
+
+                    {systemLogsPage < totalPages - 2 && <span className="px-2 text-gray-400">...</span>}
+                    <button
+                      onClick={() => fetchSystemLogs(totalPages)}
+                      className={`px-3 py-1.5 text-sm border rounded-lg ${systemLogsPage === totalPages ? 'bg-emerald-600 text-white' : 'border-gray-200'}`}
+                    >{totalPages}</button>
+                  </>
+                )}
+
+                <button
+                  onClick={() => fetchSystemLogs(Math.min(totalPages, systemLogsPage + 1))}
+                  disabled={systemLogsPage === totalPages}
+                  className="px-3 py-1.5 text-sm border border-gray-200 rounded-lg disabled:opacity-40 hover:bg-gray-50 transition-colors"
+                >
+                  Next →
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
       </div>
-    </div>
-  );
+    );
+  };
 
   const fetchPendingBookings = async () => {
     try {
@@ -449,7 +577,9 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
             status,
             profiles:student_id (
               id,
-              full_name,
+              first_name,
+              last_name,
+              middle_initial,
               email,
               student_number,
               year_level
@@ -542,15 +672,15 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
           .neq('status', 'cancelled');
 
         const today = new Date().toISOString().split('T')[0];
-        
+
         // Denominator: Completed duties or duties that were supposed to happen (past dates)
-        const eligibleDuties = myDuties?.filter(d => 
+        const eligibleDuties = myDuties?.filter(d =>
           d.status === 'completed' || d.schedules.date <= today
         ) || [];
 
         const completedDuties = eligibleDuties.filter(d => d.status === 'completed');
-        
-        const upcomingDuties = myDuties?.filter(d => 
+
+        const upcomingDuties = myDuties?.filter(d =>
           d.status === 'booked' && d.schedules.date > today
         ) || [];
 
@@ -563,6 +693,32 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
           upcomingDuties: upcomingDuties.length,
           completionRate: rate
         });
+      } else if (user.role === 'parent') {
+        const targetId = selectedChildId || linkedChildren[0]?.student_id;
+        if (!targetId) return;
+
+        const { data: cDuties } = await supabase
+          .from('schedule_students')
+          .select('id, status')
+          .eq('student_id', targetId)
+          .neq('status', 'cancelled');
+        
+        setDashboardStats({
+          childDutiesCount: cDuties?.length || 0,
+          pendingApprovals: cDuties?.filter(d => d.status === 'booked').length || 0
+        });
+
+        // Fetch child's name
+        const { data: studentProfile } = await supabase
+          .from('profiles')
+          .select('first_name, last_name, middle_initial')
+          .eq('id', targetId)
+          .single();
+        
+        if (studentProfile) {
+          const name = studentProfile.first_name + ' ' + (studentProfile.middle_initial ? studentProfile.middle_initial + ' ' : '') + studentProfile.last_name;
+          setChildName(name);
+        }
       }
     } catch (error) {
       console.error('Error fetching dashboard stats:', error);
@@ -579,10 +735,53 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
     }
   };
 
+  const fetchLinkedChildren = async () => {
+    try {
+      const { data, error } = await dbHelpers.getLinkedChildren();
+      if (error) throw error;
+      setLinkedChildren(data || []);
+      if (data && data.length > 0 && !selectedChildId) {
+        setSelectedChildId(data[0].student_id);
+      }
+    } catch (error) {
+      console.error('Error fetching linked children:', error);
+    }
+  };
+
+  useEffect(() => {
+    if (user?.role === 'parent' && selectedChildId) {
+      fetchChildDuties();
+      fetchDashboardStats();
+    }
+  }, [selectedChildId, user?.role]);
+
+  const handleRequestLink = async (e) => {
+    e.preventDefault();
+    if (!linkStudentNumber.trim()) return;
+    
+    setIsRequestingLink(true);
+    try {
+      const response = await dbHelpers.requestParentStudentLink(linkStudentNumber);
+      if (response.success) {
+        success('Link request sent! Waiting for admin approval.');
+        setLinkStudentNumber('');
+      } else {
+        error(response.error || 'Failed to send request');
+      }
+    } catch (err) {
+      error(err.message);
+    } finally {
+      setIsRequestingLink(false);
+    }
+  };
+
   const fetchChildDuties = async () => {
     try {
-      console.log('Fetching child duties for parent:', user.id);
-      const data = await dbHelpers.getChildDuties(user.id);
+      const targetId = selectedChildId || linkedChildren[0]?.student_id;
+      if (!targetId) return;
+
+      console.log('Fetching child duties for student:', targetId);
+      const data = await dbHelpers.getChildDuties(targetId);
       console.log('Child duties fetched:', data);
       setChildDuties(data || []);
     } catch (error) {
@@ -601,7 +800,7 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
       await supabase.from('duty_logs').insert({
         action: 'logout',
         performed_by: user.id,
-        notes: `User ${user.full_name} logged out`
+        notes: `User ${user.first_name} ${user.last_name} logged out`
       });
       await supabase.auth.signOut();
     } catch (error) {
@@ -757,8 +956,8 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
       try {
         const { data: admins, error: adminError } = await supabase
           .from('profiles')
-          .select('id, full_name')
-          .eq('role', 'admin');
+          .select('id, first_name, last_name')
+          .in('role', ['admin', 'co-admin']);
 
         const dateStr = new Date(date + 'T00:00:00').toLocaleDateString('en-US', {
           year: 'numeric',
@@ -774,7 +973,7 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
           const adminNotifications = admins.map(admin => ({
             user_id: admin.id,
             title: 'New Duty Booking',
-            message: `${user.full_name} has booked duty for ${dateStr} at ${schedule.location}`,
+            message: `${user.first_name} ${user.last_name} has booked duty for ${dateStr} at ${schedule.location}`,
             type: 'info',
             read: false
           }));
@@ -806,7 +1005,7 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
           const parentNotifications = parents.map(parent => ({
             user_id: parent.id,
             title: 'Child Duty Booked',
-            message: `Your child ${user.full_name} has booked duty for ${dateStr} at ${schedule.location}`,
+            message: `Your child ${user.first_name} ${user.last_name} has booked duty for ${dateStr} at ${schedule.location}`,
             type: 'info',
             read: false
           }));
@@ -866,7 +1065,7 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
 
       const { data: bookings, error: bookingsError } = await supabase
         .from('schedule_students')
-        .select('student_id, profiles:student_id(full_name)')
+        .select('student_id, profiles:student_id(*)')
         .eq('schedule_id', scheduleId)
         .eq('status', 'booked');
 
@@ -1020,6 +1219,26 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
         } else {
           console.log('✅ Notification sent to student');
         }
+
+        // Notify Parent (SMS & Email)
+        console.log('🔵 Sending external notifications to parent...');
+        const { data: parents } = await supabase
+          .from('profiles')
+          .select('id, first_name, last_name, full_name, phone_number, email')
+          .eq('role', 'parent')
+          .eq('student_id', booking.student_id);
+
+        if (parents && parents.length > 0) {
+          parents.forEach(parent => {
+            const msg = `Admin has approved ${studentName}'s scheduled duty for ${dateStr}.`;
+            if (parent.phone_number) {
+              sendSmsNotification(parent.phone_number, msg);
+            }
+            if (parent.email) {
+              sendEmailNotification(parent.email, 'Child Duty Approved', msg);
+            }
+          });
+        }
       } catch (err) {
         console.warn('⚠️ Notification error (non-critical):', err);
       }
@@ -1121,7 +1340,7 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
 
       const { data: bookings, error: bookingsError } = await supabase
         .from('schedule_students')
-        .select('student_id, profiles:student_id(full_name)')
+        .select('student_id, profiles:student_id(*)')
         .eq('schedule_id', scheduleId)
         .eq('status', 'booked');
 
@@ -1155,6 +1374,31 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
             console.warn('Failed to send notifications:', notifError);
           } else {
             console.log(`Sent notifications to ${notifications.length} student(s)`);
+          }
+
+          // Notify Parents
+          const studentIds = bookings.map(b => b.student_id);
+          const { data: parents } = await supabase
+            .from('profiles')
+            .select('id, student_id, phone_number, email')
+            .eq('role', 'parent')
+            .in('student_id', studentIds);
+
+          if (parents && parents.length > 0) {
+            parents.forEach(parent => {
+              const relatedBooking = bookings.find(b => b.student_id === parent.student_id);
+              const childName = relatedBooking?.profiles
+                ? (relatedBooking.profiles.first_name ? `${relatedBooking.profiles.first_name} ${relatedBooking.profiles.last_name}` : relatedBooking.profiles.full_name)
+                : 'Your child';
+              const msg = `Admin has approved ${childName}'s scheduled duty for ${dateStr}.`;
+
+              if (parent.phone_number) {
+                sendSmsNotification(parent.phone_number, msg);
+              }
+              if (parent.email) {
+                sendEmailNotification(parent.email, 'Child Duty Approved', msg);
+              }
+            });
           }
         } catch (err) {
           console.warn('Notification error (non-critical):', err);
@@ -1288,7 +1532,7 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
 
       const { data: bookings } = await supabase
         .from('schedule_students')
-        .select('student_id, profiles:student_id(full_name)')
+        .select('student_id, profiles:student_id(*)')
         .eq('schedule_id', scheduleToReject)
         .eq('status', 'booked');
 
@@ -1470,11 +1714,13 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
           .single();
 
         if (bookingDetails?.schedules) {
-          const { data: parents } = await supabase
-            .from('profiles')
-            .select('id')
-            .eq('role', 'parent')
-            .eq('student_id', user.id);
+          const { data: parentLinks } = await supabase
+            .from('parent_student_links')
+            .select('parent_id, profiles!parent_id(id, phone_number, email)')
+            .eq('student_id', user.id)
+            .eq('status', 'approved');
+
+          const parents = parentLinks?.map(link => link.profiles) || [];
 
           if (parents && parents.length > 0) {
             const dateStr = new Date(bookingDetails.schedules.date + 'T00:00:00').toLocaleDateString('en-US', {
@@ -1483,16 +1729,30 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
               day: 'numeric'
             });
 
-            const parentNotifications = parents.map(parent => ({
-              user_id: parent.id,
-              title: 'Child Duty Completed ✓',
-              message: `Your child ${user.full_name} has completed duty for ${dateStr} at ${bookingDetails.schedules.location}`,
-              type: 'success',
-              read: false
-            }));
+            const parentNotifications = [];
+            parents.forEach(parent => {
+              const msg = `Hello, your child Name: ${user.first_name} ${user.last_name} has marked their duty on Date: ${dateStr} and Time: 8:00 AM - 5:00 PM at ${bookingDetails.schedules.location} as COMPLETED.`;
+              parentNotifications.push({
+                user_id: parent.id,
+                title: 'Child Duty Completed ✓',
+                message: msg,
+                type: 'success',
+                read: false
+              });
 
-            await supabase.from('notifications').insert(parentNotifications);
-            console.log(`Sent completion notifications to ${parentNotifications.length} parent(s)`);
+              // Trigger external notifications
+              if (parent.phone_number) {
+                sendSmsNotification(parent.phone_number, msg);
+              }
+              if (parent.email) {
+                sendEmailNotification(parent.email, 'Child Duty Completed ✓', msg);
+              }
+            });
+
+            if (parentNotifications.length > 0) {
+              await supabase.from('notifications').insert(parentNotifications);
+              console.log(`Sent completion notifications to ${parentNotifications.length} parent(s)`);
+            }
           }
         }
       } catch (notifErr) {
@@ -1560,7 +1820,9 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
   // Define menu items based on user role
   const menuItems = [
     { id: 'dashboard', label: 'Dashboard', icon: Home },
-    { id: 'schedule', label: 'Schedule Calendar', icon: Calendar },
+    ...(isAdmin ? [] : [
+      { id: 'schedule', label: 'Schedule Calendar', icon: Calendar }
+    ]),
     ...(user?.role === 'student' ? [
       { id: 'duties', label: 'My Duties', icon: Clock }
     ] : []),
@@ -1571,120 +1833,28 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
       { id: 'reports', label: 'Reports & Analytics', icon: BarChart3 },
       { id: 'logs', label: 'System Logs', icon: Activity }
     ] : []),
+
     ...(user?.role === 'parent' ? [
-      { id: 'child-duties', label: "Child's Duties", icon: Eye }
+      { id: 'child-duties', label: "Children's Duties", icon: Eye }
     ] : []),
     { id: 'notifications', label: 'Notifications', icon: Bell },
     { id: 'profile', label: 'Profile Settings', icon: Settings },
   ];
 
   // Dashboard Overview Component
-  const quickActions = [
-    {
-      name: 'Create New Schedule',
-      icon: Plus,
-      color: 'bg-blue-500',
-      onClick: () => {
-        setActiveTab('schedule-management');
-      }
-    },
-    {
-      name: 'Manage Students',
-      icon: Users,
-      color: 'bg-green-500',
-      onClick: () => {
-        setActiveTab('student-management');
-      }
-    },
-    {
-      name: 'View Reports',
-      icon: BarChart3,
-      color: 'bg-purple-500',
-      onClick: () => {
-        setActiveTab('reports');
-      }
-    }
-  ];
-
-  const locationChartData = {
-    labels: Object.keys(chartData.locationDistribution),
-    datasets: [{
-      label: 'Schedules by Location',
-      data: Object.values(chartData.locationDistribution),
-      backgroundColor: [
-        '#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899'
-      ]
-    }]
-  };
-
-  const bookingTrendsData = {
-    labels: Object.keys(chartData.bookingTrends).map(date =>
-      new Date(date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
-    ),
-    datasets: [{
-      label: 'Bookings',
-      data: Object.values(chartData.bookingTrends),
-      borderColor: '#3b82f6',
-      backgroundColor: 'rgba(59, 130, 246, 0.1)',
-      tension: 0.4
-    }]
-  };
-
-  const approvalStatusData = {
-    labels: ['Pending', 'Approved', 'Cancelled', 'Completed'],
-    datasets: [{
-      data: [
-        chartData.approvalStatus.pending || 0,
-        chartData.approvalStatus.approved || 0,
-        chartData.approvalStatus.cancelled || 0,
-        chartData.approvalStatus.completed || 0
-      ],
-      backgroundColor: ['#f59e0b', '#10b981', '#ef4444', '#3b82f6']
-    }]
-  };
 
   const renderDashboardView = () => (
-    <div className="space-y-6">
-      <div className="flex justify-between items-center">
+    <div className="space-y-4">
+      <div className="flex justify-between items-center mb-0">
         <div>
           <h2 className="text-3xl font-bold text-gray-900">
-            Welcome back, {user?.full_name}
+            Welcome back, {user?.first_name} {user?.last_name}
           </h2>
-          <p className="text-gray-600 mt-1">
-            {new Date().toLocaleDateString('en-US', {
-              weekday: 'long',
-              year: 'numeric',
-              month: 'long',
-              day: 'numeric'
-            })}
-          </p>
         </div>
-
       </div>
 
-      {/* Quick Actions */}
-      {isAdmin && (
-        <div className="bg-white rounded-lg shadow mb-8">
-          <div className="p-6">
-            <h2 className="text-lg font-semibold text-gray-900 mb-4">Quick Actions</h2>
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-              {quickActions.map((action, index) => (
-                <button
-                  key={index}
-                  onClick={action.onClick}
-                  className={`flex items-center space-x-4 p-6 rounded-xl hover:shadow-lg transition-all ${action.color} text-white h-20`}
-                >
-                  <action.icon className="h-8 w-8 flex-shrink-0" />
-                  <span className="font-semibold text-lg">{action.name}</span>
-                </button>
-              ))}
-            </div>
-          </div>
-        </div>
-      )}
-
       {/* Stats Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
         {isAdmin ? (
           <>
             <button onClick={() => setActiveTab('student-management')} className="card bg-gradient-to-r from-slate-700 to-slate-800 text-white h-24 w-full text-left hover:brightness-110 hover:shadow-lg transition-all cursor-pointer">
@@ -1757,75 +1927,42 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
               </div>
             </button>
           </>
-        ) : (
-          // Parent view
-          <button onClick={() => setActiveTab('child-duties')} className="card bg-gradient-to-r from-slate-500 to-slate-600 text-white h-24 w-full text-left hover:brightness-110 hover:shadow-lg transition-all cursor-pointer">
-            <div className="flex items-center justify-between h-full px-4">
-              <div className="flex-1">
-                <p className="text-slate-200 text-xs font-medium uppercase tracking-wide">Child's Duties</p>
-                <p className="text-2xl font-bold mt-1">View Access</p>
-              </div>
-              <div className="flex-shrink-0 ml-3">
-                <Eye className="w-8 h-8 text-slate-200 opacity-80" />
-              </div>
-            </div>
-          </button>
-        )}
+        ) : null}
       </div>
 
-      {/* Charts */}
+      {/* Location Distribution Card */}
       {isAdmin && (
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 mb-8">
-          {/* Location Distribution */}
-          <div className="bg-white p-6 rounded-lg shadow">
-            <h3 className="text-lg font-semibold text-gray-900 mb-4">Location Distribution</h3>
-            <Pie data={locationChartData} options={{
-              responsive: true,
-              plugins: {
-                legend: {
-                  position: 'bottom'
-                }
-              }
-            }} />
+        <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-6 mb-2">
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="text-lg font-semibold text-gray-900">Location Distribution</h3>
+            <span className="text-xs text-gray-500 bg-gray-100 px-2 py-1 rounded-full">All Schedules</span>
           </div>
-
-          {/* Booking Trends */}
-          <div className="bg-white p-6 rounded-lg shadow">
-            <h3 className="text-lg font-semibold text-gray-900 mb-4">Booking Trends (Last 7 Days)</h3>
-            <Line data={bookingTrendsData} options={{
-              responsive: true,
-              plugins: {
-                legend: {
-                  display: false
-                }
-              },
-              scales: {
-                y: {
-                  beginAtZero: true
-                }
-              }
-            }} />
+          <div className="space-y-3">
+            {Object.entries(chartData.locationDistribution).length === 0 ? (
+              <p className="text-sm text-gray-400 text-center py-4">No schedule data yet</p>
+            ) : (
+              Object.entries(chartData.locationDistribution)
+                .sort(([, a], [, b]) => b - a)
+                .map(([location, count]) => {
+                  const total = Object.values(chartData.locationDistribution).reduce((s, v) => s + v, 0);
+                  const pct = total > 0 ? Math.round((count / total) * 100) : 0;
+                  return (
+                    <div key={location}>
+                      <div className="flex justify-between items-center mb-1">
+                        <span className="text-sm font-medium text-gray-700 truncate max-w-[60%]">{location}</span>
+                        <span className="text-sm font-bold text-gray-900">{count} <span className="text-xs text-gray-400 font-normal">students ({pct}%)</span></span>
+                      </div>
+                      <div className="w-full bg-gray-100 rounded-full h-2">
+                        <div
+                          className="bg-gradient-to-r from-emerald-500 to-green-400 h-2 rounded-full transition-all duration-500"
+                          style={{ width: `${pct}%` }}
+                        />
+                      </div>
+                    </div>
+                  );
+                })
+            )}
           </div>
-        </div>
-      )}
-
-      {/* Approval Status Chart */}
-      {isAdmin && (
-        <div className="bg-white p-6 rounded-lg shadow mb-8">
-          <h3 className="text-lg font-semibold text-gray-900 mb-4">Approval Status</h3>
-          <Bar data={approvalStatusData} options={{
-            responsive: true,
-            plugins: {
-              legend: {
-                display: false
-              }
-            },
-            scales: {
-              y: {
-                beginAtZero: true
-              }
-            }
-          }} />
         </div>
       )}
 
@@ -1885,37 +2022,39 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
             </button>
           </div>
           <div className="space-y-3">
-            {schedules
-              .filter(s => new Date(s.date) >= new Date() &&
-                (isAdmin ||
-                  s.schedule_students?.some(ss => ss.student_id === user.id)))
-              .slice(0, 5)
-              .map((schedule) => {
+            {(() => {
+              const upcoming = schedules
+                .filter(s => {
+                  if (new Date(s.date) < new Date()) return false;
+                  // If not admin, check if the duty belongs to the student (or child if parent)
+                  const targetId = user.role === 'parent' ? selectedChildId : user.id;
+                  if (!isAdmin && !s.schedule_students?.some(ss => ss.student_id === targetId)) return false;
+                  
+                  if (isAdmin) {
+                    const activeCount = s.schedule_students?.filter(ss => ss.status !== 'cancelled').length || 0;
+                    if (activeCount === 0 && s.status === 'pending') return false;
+                  }
+                  return true;
+                })
+                .slice(0, 5);
+              if (upcoming.length === 0) {
+                return <p className="text-gray-400 text-sm text-center py-4">No upcoming duties scheduled</p>;
+              }
+              return upcoming.map((schedule) => {
                 const activeStudents = schedule.schedule_students?.filter(ss => ss.status !== 'cancelled').length || 0;
                 const maxStudents = schedule.max_students || 2;
-
                 return (
                   <button key={schedule.id} onClick={() => setActiveTab('schedule')} className="w-full flex items-center justify-between p-3 rounded-lg bg-gray-50 hover:bg-gray-100 cursor-pointer transition-colors text-left">
                     <div>
-                      <p className="font-medium text-gray-900">
-                        {new Date(schedule.date).toLocaleDateString()}
-                      </p>
-                      <p className="text-sm text-gray-500">
-                        {activeStudents}/{maxStudents} students assigned
-                      </p>
+                      <p className="font-medium text-gray-900">{new Date(schedule.date).toLocaleDateString()}</p>
+                      <p className="text-sm text-gray-500">{activeStudents}/{maxStudents} students • {schedule.location}</p>
                     </div>
-                    <span className={`px-2 py-1 rounded-full text-xs font-medium ${schedule.status === 'approved'
-                      ? 'bg-green-100 text-green-800'
-                      : 'bg-yellow-100 text-yellow-800'
-                      }`}>
-                      {schedule.status}
-                    </span>
+                    <span className={`px-2 py-1 rounded-full text-xs font-medium ${schedule.status === 'approved' ? 'bg-green-100 text-green-800' : 'bg-yellow-100 text-yellow-800'
+                      }`}>{schedule.status}</span>
                   </button>
                 );
-              })}
-            {schedules.length === 0 && (
-              <p className="text-gray-500 text-center py-4">No upcoming duties</p>
-            )}
+              });
+            })()}
           </div>
         </div>
       </div>
@@ -1984,11 +2123,13 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
                             <div className="flex items-center space-x-3 flex-1">
                               <div className="w-8 h-8 bg-emerald-100 rounded-full flex items-center justify-center flex-shrink-0">
                                 <span className="text-emerald-700 text-xs font-medium">
-                                  {student.profiles?.full_name?.split(' ').map(n => n[0]).join('').substring(0, 2)}
+                                  {(student.profiles?.first_name?.[0] || '') + (student.profiles?.last_name?.[0] || '')}
                                 </span>
                               </div>
                               <div className="flex-1 min-w-0">
-                                <p className="text-sm font-medium text-gray-900 truncate">{student.profiles?.full_name}</p>
+                                <p className="text-sm font-medium text-gray-900 truncate">
+                                  {student.profiles?.first_name} {student.profiles?.last_name}
+                                </p>
                                 <p className="text-xs text-gray-600">{student.profiles?.student_number} • {student.profiles?.year_level}</p>
                               </div>
                               <div className="text-xs text-gray-500 hidden sm:block">
@@ -1999,7 +2140,7 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
                             {/* Individual student action buttons */}
                             <div className="flex space-x-2 ml-4">
                               <button
-                                onClick={() => handleApproveStudent(schedule.id, student.id, student.profiles?.full_name)}
+                                onClick={() => handleApproveStudent(schedule.id, student.id, `${student.profiles?.first_name} ${student.profiles?.last_name}`)}
                                 className="flex items-center space-x-1 bg-green-600 hover:bg-green-700 text-white px-3 py-1 rounded transition-colors text-xs"
                                 title="Approve this student"
                               >
@@ -2007,7 +2148,7 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
                                 <span className="hidden sm:inline">Approve</span>
                               </button>
                               <button
-                                onClick={() => handleRejectStudent(schedule.id, student.id, student.profiles?.full_name)}
+                                onClick={() => handleRejectStudent(schedule.id, student.id, `${student.profiles?.first_name} ${student.profiles?.last_name}`)}
                                 className="flex items-center space-x-1 bg-red-600 hover:bg-red-700 text-white px-3 py-1 rounded transition-colors text-xs"
                                 title="Reject this student"
                               >
@@ -2092,15 +2233,7 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
     <div className="space-y-6">
       <div className="flex justify-between items-center">
         <h2 className="text-2xl font-bold text-gray-900">Duty Schedule Calendar</h2>
-        {isAdmin && (
-          <button
-            onClick={() => setActiveTab('schedule-management')}
-            className="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded-lg transition-colors flex items-center space-x-2"
-          >
-            <Plus className="w-4 h-4" />
-            <span>Manage Schedules</span>
-          </button>
-        )}
+
       </div>
 
       {/* Calendar Navigation */}
@@ -2116,14 +2249,9 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
                 className="input-field max-w-xs"
               >
                 <option value="all">All Hospitals</option>
-                <option value="ISDH - Magsingal">ISDH - Magsingal</option>
-                <option value="ISDH - Sinait">ISDH - Sinait</option>
-                <option value="ISDH - Narvacan">ISDH - Narvacan</option>
-                <option value="ISPH - Gab. Silang">ISPH - Gab. Silang</option>
-                <option value="RHU - Sto. Domingo">RHU - Sto. Domingo</option>
-                <option value="RHU - Santa">RHU - Santa</option>
-                <option value="RHU - San Ildefonso">RHU - San Ildefonso</option>
-                <option value="RHU - Bantay">RHU - Bantay</option>
+                {hospitalLocations.map((h) => (
+                  <option key={h.name} value={h.name}>{h.name}</option>
+                ))}
               </select>
             </div>
             <div className="text-xs text-gray-600">
@@ -2188,6 +2316,7 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
 
                   // FIXED: Role-specific booking logic
                   const canBook = user?.role === 'student' &&
+                    bookingStatus === 'open' &&
                     day.schedule &&
                     !day.isPast &&
                     !isFull &&
@@ -2249,13 +2378,12 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
                               <>
                                 {isBooked ? (
                                   <>
-                                    <span className={`px-2 py-1 rounded-full text-xs font-medium ${isCompleted ? 'bg-blue-100 text-blue-800' :
+                                    <span className={`px-2 py-1 rounded-full text-xs font-medium ${
                                       isApproved ? 'bg-green-100 text-green-800' :
                                         myBooking?.status === 'cancelled' ? 'bg-red-100 text-red-800' :
                                           'bg-yellow-100 text-yellow-800'
                                       }`}>
-                                      {isCompleted ? 'COMPLETED' :
-                                        isApproved ? 'APPROVED' :
+                                      {isApproved ? 'APPROVED' :
                                           myBooking?.status === 'cancelled' ? 'CANCELLED' :
                                             'PENDING'}
                                     </span>
@@ -2284,7 +2412,7 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
                                 key={idx}
                                 className="text-xs px-2 py-1 rounded bg-gray-100 text-gray-700 flex justify-between items-center"
                               >
-                                <span className="truncate">{assignment.profiles?.full_name?.split(' ')[0] || 'Student'}</span>
+                                <span className="truncate">{assignment.profiles?.first_name || 'Student'}</span>
                                 <span className={`w-2 h-2 rounded-full ${day.schedule.status === 'approved' ? 'bg-green-500' : 'bg-yellow-500'
                                   }`}></span>
                               </div>
@@ -2299,13 +2427,13 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
                                   : 'bg-gray-50 text-gray-600'
                                   }`}
                               >
-                                {assignment.student_id === user.id ? 'YOU' : assignment.profiles?.full_name?.split(' ')[0] || 'Student'}
+                                {assignment.student_id === user.id ? 'YOU' : assignment.profiles?.first_name || 'Student'}
                               </div>
                             ))
                           ) : (
                             // Parent: Only show if their child is assigned
                             activeStudents
-                              .filter(assignment => assignment.student_id === user.student_id)
+                              .filter(assignment => assignment.student_id === selectedChildId)
                               .map((assignment, idx) => (
                                 <div
                                   key={idx}
@@ -2336,14 +2464,20 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
                       {/* ROLE-BASED ACTION BUTTONS */}
                       {user?.role === 'student' && (
                         <>
+                          {bookingStatus === 'closed' && day.schedule && !day.isPast && !isBooked && day.isCurrentMonth && (
+                            <div className="mt-2 text-xs text-red-600 font-medium text-center bg-red-50 border border-red-100 px-2 py-1 rounded">
+                              Booking Closed
+                            </div>
+                          )}
+
                           {/* Booking button for students */}
                           {canBook && (
                             <button
                               onClick={() => {
-  const d = day.date;
-  const localDate = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-  handleBookDuty(day.schedule.id, localDate);
-}}
+                                const d = day.date;
+                                const localDate = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+                                handleBookDuty(day.schedule.id, localDate);
+                              }}
                               className="mt-2 w-full text-xs bg-emerald-600 text-white px-2 py-1 rounded hover:bg-emerald-700 transition-colors"
                             >
                               Book Duty
@@ -2627,7 +2761,7 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
 
     return (
       <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-[100] flex items-center justify-center p-4 transition-all duration-300">
-        <div 
+        <div
           className="bg-white rounded-3xl shadow-2xl w-full max-w-lg overflow-hidden transform transition-all animate-in fade-in zoom-in duration-300"
           onClick={(e) => e.stopPropagation()}
         >
@@ -2642,14 +2776,14 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
                 <p className="text-emerald-50 text-xs font-medium uppercase tracking-wider">Reference #{selectedDuty.id.slice(0, 8)}</p>
               </div>
             </div>
-            <button 
+            <button
               onClick={() => setShowDutyDetailsModal(false)}
               className="hover:bg-white/20 p-2 rounded-full transition-colors"
             >
               <X className="w-6 h-6" />
             </button>
           </div>
-          
+
           {/* Content */}
           <div className="p-8 space-y-8">
             {/* Status & Date Row */}
@@ -2657,20 +2791,19 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
               <div className="space-y-1">
                 <p className="text-[10px] font-bold text-gray-400 uppercase tracking-[0.1em]">Duty Date</p>
                 <p className="text-gray-900 font-bold text-lg">
-                  {new Date(schedules.date).toLocaleDateString('en-US', { 
-                    weekday: 'long', 
-                    year: 'numeric', 
-                    month: 'long', 
-                    day: 'numeric' 
+                  {new Date(schedules.date).toLocaleDateString('en-US', {
+                    weekday: 'long',
+                    year: 'numeric',
+                    month: 'long',
+                    day: 'numeric'
                   })}
                 </p>
               </div>
               <div className="text-right">
                 <p className="text-[10px] font-bold text-gray-400 uppercase tracking-[0.1em] mb-1.5">Current Status</p>
-                <span className={`inline-flex px-3 py-1 rounded-full text-xs font-bold ${
-                  selectedDuty.status === 'completed' ? 'bg-blue-100 text-blue-800' : 
+                <span className={`inline-flex px-3 py-1 rounded-full text-xs font-bold ${selectedDuty.status === 'completed' ? 'bg-blue-100 text-blue-800' :
                   'bg-green-100 text-green-800'
-                }`}>
+                  }`}>
                   {selectedDuty.status.toUpperCase()}
                 </span>
               </div>
@@ -2752,64 +2885,37 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
   // Notifications View Component
   const renderNotificationsView = () => (
     <div className="space-y-6">
-      <div className="flex justify-between items-center">
+      <div className="flex items-center">
         <h2 className="text-2xl font-bold text-gray-900">Notifications</h2>
-        <button
-          onClick={async () => {
-            try {
-              await supabase
-                .from('notifications')
-                .update({ read: true, read_at: new Date().toISOString() })
-                .eq('user_id', user.id)
-                .eq('read', false);
-
-              setNotifications(prev => prev.map(n => ({ ...n, read: true })));
-              setUnreadCount(0);
-            } catch (error) {
-              console.error('Error marking all as read:', error);
-            }
-          }}
-          className="text-emerald-600 hover:text-emerald-700 text-sm font-medium"
-        >
-          Mark All as Read
-        </button>
       </div>
 
-      <div className="space-y-4">
+      <div className="space-y-3">
         {notifications.map((notification) => (
           <div
             key={notification.id}
-            className={`card cursor-pointer transition-all hover:shadow-lg ${!notification.read ? 'border-l-4 border-l-emerald-500 bg-emerald-50' : ''
-              }`}
+            className={`card cursor-pointer transition-all hover:shadow-lg ${!notification.read ? 'border-l-4 border-l-emerald-500 bg-emerald-50/60' : ''}`}
             onClick={() => handleNotificationClick(notification)}
           >
             <div className="flex items-start space-x-4">
-              <div className={`p-2 rounded-full ${notification.type === 'success' ? 'bg-green-100 text-green-600' :
-                notification.type === 'warning' ? 'bg-yellow-100 text-yellow-600' :
-                  notification.type === 'error' ? 'bg-red-100 text-red-600' :
-                    'bg-blue-100 text-blue-600'
-                }`}>
-                {notification.type === 'success' ? <CheckCircle className="w-5 h-5" /> :
-                  notification.type === 'warning' ? <AlertTriangle className="w-5 h-5" /> :
-                    notification.type === 'error' ? <XCircle className="w-5 h-5" /> :
-                      <Info className="w-5 h-5" />}
+              <div className="w-12 h-12 rounded-2xl bg-gray-50 p-2 flex-shrink-0 border border-emerald-100 flex items-center justify-center">
+                <img
+                  src="/image0.png"
+                  alt="Kumadronas logo"
+                  className="w-full h-full object-contain"
+                />
               </div>
               <div className="flex-1">
                 <div className="flex items-center justify-between">
                   <h4 className="font-medium text-gray-900">{notification.title}</h4>
                   <div className="flex items-center space-x-2">
-                    <span className="text-sm text-gray-500">
-                      {new Date(notification.created_at).toLocaleDateString()}
-                    </span>
+                    <span className="text-sm text-gray-500">{new Date(notification.created_at).toLocaleDateString()}</span>
                     {!notification.read && (
-                      <div className="w-3 h-3 bg-blue-500 rounded-full"></div>
+                      <div className="w-2.5 h-2.5 bg-emerald-500 rounded-full"></div>
                     )}
                   </div>
                 </div>
-                <p className="text-gray-700 mt-1">{notification.message}</p>
-                <p className="text-sm text-gray-500 mt-2">
-                  {new Date(notification.created_at).toLocaleTimeString()}
-                </p>
+                <p className="text-gray-600 mt-1 text-sm">{notification.message}</p>
+                <p className="text-xs text-gray-400 mt-1.5">{new Date(notification.created_at).toLocaleTimeString()}</p>
               </div>
             </div>
           </div>
@@ -2853,21 +2959,64 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
       case 'child-duties':
         return (
           <div className="space-y-6">
-            <div className="flex justify-between items-center">
-              <h2 className="text-3xl font-bold text-gray-900">Child's Duty History</h2>
-              <div className="text-sm text-gray-600">
-                Monitoring your child's clinical duty assignments
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+              <div>
+                <h2 className="text-3xl font-bold text-gray-900">Children's Duty History</h2>
+                <p className="text-gray-500 mt-1">Monitoring your children's clinical assignments</p>
               </div>
+
+              {/* Add Child Search */}
+              <form onSubmit={handleRequestLink} className="flex items-center space-x-2">
+                <div className="relative">
+                  <Hash className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+                  <input
+                    type="text"
+                    value={linkStudentNumber}
+                    onChange={(e) => setLinkStudentNumber(e.target.value)}
+                    placeholder="Enter Student No. (e.g. C-23-1234)"
+                    className="pl-10 pr-4 py-2 bg-white border border-gray-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400 w-full sm:w-64"
+                    disabled={isRequestingLink}
+                  />
+                </div>
+                <button
+                  type="submit"
+                  disabled={isRequestingLink || !linkStudentNumber.trim()}
+                  className="bg-emerald-600 hover:bg-emerald-700 text-white p-2.5 rounded-xl transition-all disabled:opacity-50"
+                  title="Request Link"
+                >
+                  {isRequestingLink ? <div className="animate-spin rounded-full h-4 w-4 border-2 border-white border-t-transparent" /> : <Plus className="w-4 h-4" />}
+                </button>
+              </form>
             </div>
+
+            {/* Child Selector Tabs */}
+            {linkedChildren.length > 0 && (
+              <div className="flex flex-wrap gap-2 p-1 bg-gray-100 rounded-2xl w-fit">
+                {linkedChildren.map((link) => (
+                  <button
+                    key={link.student_id}
+                    onClick={() => setSelectedChildId(link.student_id)}
+                    className={`px-4 py-2 rounded-xl text-sm font-bold transition-all flex items-center space-x-2 ${
+                      selectedChildId === link.student_id
+                        ? 'bg-white text-emerald-600 shadow-sm'
+                        : 'text-gray-500 hover:text-emerald-500'
+                    }`}
+                  >
+                    <User className="w-4 h-4" />
+                    <span>{link.student?.first_name}</span>
+                  </button>
+                ))}
+              </div>
+            )}
 
             <div className="grid gap-4">
               {childDuties.map((duty) => (
-                <div key={duty.id} className="card hover:shadow-lg transition-shadow">
+                <div key={duty.id} className="card hover:shadow-lg transition-shadow border-l-4 border-l-emerald-500">
                   <div className="flex justify-between items-start">
                     <div className="flex-1">
                       <div className="flex items-center space-x-3 mb-3">
                         <CalendarIcon className="w-5 h-5 text-emerald-600" />
-                        <span className="font-semibold text-lg">
+                        <span className="font-semibold text-lg text-gray-900">
                           {new Date(duty.schedules.date).toLocaleDateString('en-US', {
                             weekday: 'long',
                             year: 'numeric',
@@ -2878,64 +3027,57 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
                       </div>
 
                       <div className="grid grid-cols-1 md:grid-cols-4 gap-4 text-sm">
-                        <div>
-                          <p className="text-gray-600">Booked:</p>
-                          <p className="font-medium">{new Date(duty.booking_time).toLocaleString()}</p>
+                        <div className="bg-gray-50 p-3 rounded-2xl border border-gray-100">
+                          <p className="text-[10px] text-gray-400 font-bold uppercase tracking-widest mb-1">Booked On</p>
+                          <p className="font-bold text-gray-800">{new Date(duty.booking_time).toLocaleString()}</p>
                         </div>
-                        <div>
-                          <p className="text-gray-600">Location:</p>
-                          <p className="font-medium">{duty.schedules.location || 'N/A'}</p>
+                        <div className="bg-gray-50 p-3 rounded-2xl border border-gray-100">
+                          <p className="text-[10px] text-gray-400 font-bold uppercase tracking-widest mb-1">Hospital Location</p>
+                          <p className="font-bold text-gray-800 flex items-center"><MapPin className="w-3.5 h-3.5 mr-1 text-emerald-500" /> {duty.schedules.location || 'N/A'}</p>
                         </div>
-                        <div>
-                          <p className="text-gray-600">Shift:</p>
-                          <p className="font-medium">{duty.schedules.shift_start} - {duty.schedules.shift_end}</p>
+                        <div className="bg-gray-50 p-3 rounded-2xl border border-gray-100">
+                          <p className="text-[10px] text-gray-400 font-bold uppercase tracking-widest mb-1">Duty Shift</p>
+                          <p className="font-bold text-gray-800 flex items-center"><Clock className="w-3.5 h-3.5 mr-1 text-emerald-500" /> {duty.schedules.shift_start} - {duty.schedules.shift_end}</p>
                         </div>
-                        <div>
-                          <p className="text-gray-600">Status:</p>
-                          <span className={`inline-flex px-2 py-1 rounded-full text-xs font-medium ${duty.status === 'completed' ? 'bg-blue-100 text-blue-800' :
-                            duty.status === 'approved' ? 'bg-green-100 text-green-800' :
-                              duty.status === 'cancelled' ? 'bg-red-100 text-red-800' :
-                                'bg-yellow-100 text-yellow-800'
-                            }`}>
-
-                            {duty.status === 'completed' ? 'Completed' :
-                              duty.status === 'approved' ? 'Approved' :
-                                duty.status === 'cancelled' ? 'Cancelled' :
-                                  'Pending Approval'}
+                        <div className="bg-gray-50 p-3 rounded-2xl border border-gray-100">
+                          <p className="text-[10px] text-gray-400 font-bold uppercase tracking-widest mb-1">Verification</p>
+                          <span className={`inline-flex px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider ${
+                            duty.status === 'completed' || duty.status === 'approved' ? 'bg-emerald-100 text-emerald-700' :
+                            duty.status === 'cancelled' ? 'bg-red-100 text-red-700' :
+                            'bg-amber-100 text-amber-700'
+                          }`}>
+                            {duty.status === 'completed' ? 'Duty Completed' :
+                             duty.status === 'approved' ? 'Admin Approved' :
+                             duty.status === 'cancelled' ? 'Cancelled' :
+                             'Pending Review'}
                           </span>
                         </div>
                       </div>
 
                       {duty.schedules.description && (
-                        <div className="mt-3 p-3 bg-gray-50 rounded-lg">
-                          <p className="text-sm text-gray-600 mb-1">Schedule Description:</p>
-                          <p className="text-sm font-medium text-gray-900">{duty.schedules.description}</p>
+                        <div className="mt-4 p-4 bg-emerald-50/50 border border-emerald-100 rounded-2xl">
+                          <p className="text-xs font-bold text-emerald-700 uppercase tracking-widest mb-1">Special Instructions:</p>
+                          <p className="text-sm text-gray-700 italic">"{duty.schedules.description}"</p>
                         </div>
                       )}
                     </div>
 
                     <div className="flex flex-col items-end space-y-2 ml-4">
-                      {duty.status === 'completed' && (
-                        <div className="text-xs text-green-600 px-3 py-1 bg-green-50 rounded-lg border border-green-200">
-                          ✓ Duty Completed Successfully
+                      {duty.status !== 'cancelled' && duty.schedules.status === 'approved' && (
+                        <div className="bg-emerald-600 text-white rounded-xl p-2 shadow-sm" title="Duty Active">
+                           <CheckCircle className="w-5 h-5" />
                         </div>
                       )}
 
                       {duty.status === 'cancelled' && (
-                        <div className="text-xs text-red-600 px-3 py-1 bg-red-50 rounded-lg border border-red-200">
-                          ✗ Duty Cancelled
-                        </div>
-                      )}
-
-                      {duty.status === 'booked' && duty.schedules.status === 'approved' && (
-                        <div className="text-xs text-emerald-600 px-3 py-1 bg-emerald-50 rounded-lg border border-emerald-200">
-                          ✅ Schedule Approved - Active Duty
+                        <div className="bg-red-500 text-white rounded-xl p-2 shadow-sm" title="Cancelled">
+                           <XCircle className="w-5 h-5" />
                         </div>
                       )}
 
                       {duty.status === 'booked' && duty.schedules.status === 'pending' && (
-                        <div className="text-xs text-yellow-600 px-3 py-1 bg-yellow-50 rounded-lg border border-yellow-200">
-                          ⏳ Waiting for Admin Approval
+                        <div className="bg-amber-500 text-white rounded-xl p-2 shadow-sm" title="Awaiting Approval">
+                           <Clock className="w-5 h-5" />
                         </div>
                       )}
                     </div>
@@ -2944,15 +3086,17 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
               ))}
 
               {childDuties.length === 0 && (
-                <div className="text-center py-12">
-                  <Eye className="w-16 h-16 mx-auto mb-4 text-gray-300" />
-                  <h3 className="text-lg font-medium text-gray-900 mb-2">No Duty History Yet</h3>
-                  <p className="text-gray-600 mb-4">Your child hasn't been assigned any duties yet. Duty assignments will appear here once they start booking their clinical schedules.</p>
+                <div className="text-center py-16 bg-white rounded-3xl border border-gray-100 shadow-sm">
+                  <div className="w-16 h-16 bg-gray-100 rounded-full flex items-center justify-center mx-auto mb-4">
+                    <Eye className="w-8 h-8 text-gray-300" />
+                  </div>
+                  <h3 className="text-xl font-bold text-gray-900 mb-2">No Duty History Yet</h3>
+                  <p className="text-gray-500 max-w-sm mx-auto mb-8">This child hasn't been assigned any clinical duties yet. Assignments will appear here once they book their clinical schedules.</p>
                   <button
                     onClick={() => setActiveTab('schedule')}
-                    className="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded-lg transition-colors"
+                    className="bg-emerald-600 hover:bg-emerald-700 text-white px-6 py-2.5 rounded-xl font-bold transition-all shadow-lg shadow-emerald-200"
                   >
-                    View Schedule Calendar
+                    View Overall Schedule
                   </button>
                 </div>
               )}
@@ -2968,7 +3112,7 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
     <div className="min-h-screen bg-gray-50">
       <ToastContainer toasts={toasts} removeToast={removeToast} />
 
-      {/* Header with Navigation and Notifications */}
+      {/* Header with Navigation and Logout */}
       <header className="bg-white shadow-sm border-b border-gray-200 sticky top-0 z-40">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="flex justify-between items-center h-16">
@@ -2996,173 +3140,22 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
                   />
                 </div>
                 <div>
-                  <h1 className="text-xl font-bold text-gray-900">
-                    Kumadronas System
-                  </h1>
-                  <p className="text-xs text-gray-600 hidden sm:block">
-                    Ilocos Sur Community College
-                  </p>
+                  <h1 className="text-xl font-bold text-gray-900">Kumadronas System</h1>
+                  <p className="text-xs text-gray-600 hidden sm:block">Ilocos Sur Community College</p>
                 </div>
               </div>
             </div>
 
-            {/* Right side - Notifications and User Menu */}
-            <div className="flex items-center space-x-4">
-              {/* Notifications */}
-              <div className="relative">
-                <button
-                  onClick={() => setShowNotifications(!showNotifications)}
-                  className="p-2 text-gray-500 hover:text-gray-700 rounded-lg hover:bg-gray-100 transition-colors relative"
-                >
-                  <Bell className="w-6 h-6" />
-                  {(unreadCount + pendingSignupsCount) > 0 && (
-                    <span className="absolute -top-1 -right-1 bg-red-500 text-white text-xs rounded-full w-5 h-5 flex items-center justify-center animate-pulse">
-                      {(unreadCount + pendingSignupsCount) > 9 ? '9+' : (unreadCount + pendingSignupsCount)}
-                    </span>
-                  )}
-                </button>
-
-                {/* Notifications Dropdown */}
-                {showNotifications && (
-                  <div className="fixed sm:absolute top-16 sm:top-auto right-0 sm:right-0 left-1/2 sm:left-auto -translate-x-1/2 sm:translate-x-0 mt-0 sm:mt-2 w-[92vw] max-w-md sm:w-80 bg-white rounded-lg shadow-lg border border-gray-200 z-50">
-                    <div className="p-4 border-b border-gray-200 sticky top-0 bg-white z-10 rounded-t-lg">
-                      <div className="flex items-center justify-between">
-                        <h3 className="font-medium text-gray-900">Notifications</h3>
-                        <button
-                          onClick={() => setShowNotifications(false)}
-                          className="text-gray-400 hover:text-gray-600"
-                        >
-                          <X className="w-4 h-4" />
-                        </button>
-                      </div>
-                    </div>
-                    <div className="max-h-[75vh] sm:max-h-96 overflow-y-auto">
-                      {isAdmin && pendingSignupsCount > 0 && (
-                        <div className="px-4 py-3 bg-amber-50 border-b border-amber-100 cursor-pointer hover:bg-amber-100"
-                          onClick={() => { setActiveTab('user-management'); setShowNotifications(false); }}>
-                          <p className="text-sm font-semibold text-amber-800">Pending Student Signups</p>
-                          <p className="text-xs text-amber-600">{pendingSignupsCount} student{pendingSignupsCount > 1 ? 's' : ''} waiting for approval</p>
-                        </div>
-                      )}
-                      {notifications.slice(0, 5).map((notification) => (
-                        <div
-                          key={notification.id}
-                          className={`p-4 border-b border-gray-100 hover:bg-gray-50 cursor-pointer ${!notification.read ? 'bg-blue-50' : ''
-                            }`}
-                          onClick={() => {
-                            handleNotificationClick(notification);
-                            setShowNotifications(false);
-                          }}
-                        >
-                          <div className="flex items-start space-x-3">
-                            <div className={`w-2 h-2 rounded-full mt-2 ${notification.type === 'success' ? 'bg-green-500' :
-                              notification.type === 'warning' ? 'bg-yellow-500' :
-                                notification.type === 'error' ? 'bg-red-500' :
-                                  'bg-blue-500'
-                              }`}></div>
-                            <div className="flex-1 min-w-0">
-                              <p className="text-sm font-medium text-gray-900 truncate">
-                                {notification.title}
-                              </p>
-                              <p className="text-sm text-gray-600 truncate">
-                                {notification.message}
-                              </p>
-                              <p className="text-xs text-gray-400 mt-1">
-                                {new Date(notification.created_at).toLocaleString()}
-                              </p>
-                            </div>
-                            {!notification.read && (
-                              <div className="w-2 h-2 bg-blue-500 rounded-full"></div>
-                            )}
-                          </div>
-                        </div>
-                      ))}
-                      {notifications.length === 0 && (
-                        <div className="p-8 text-center text-gray-500">
-                          <Bell className="w-8 h-8 mx-auto mb-2 text-gray-300" />
-                          <p>No notifications</p>
-                        </div>
-                      )}
-                      {notifications.length > 5 && (
-                        <div className="p-3 text-center border-t border-gray-200">
-                          <button
-                            onClick={() => {
-                              setActiveTab('notifications');
-                              setShowNotifications(false);
-                            }}
-                            className="text-emerald-600 hover:text-emerald-700 text-sm font-medium"
-                          >
-                            View all notifications
-                          </button>
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                )}
-              </div>
-
-              {/* User Profile */}
-              <div className="relative flex items-center space-x-3">
-                <div className="hidden sm:block text-right">
-                  <p className="text-sm font-medium text-gray-900">{user?.full_name}</p>
-                  <p className="text-xs text-gray-500 capitalize">{user?.role}</p>
-                </div>
-                <button
-                  onClick={() => setShowUserMenu(!showUserMenu)}
-                  className="w-10 h-10 rounded-full overflow-hidden border-2 border-white shadow-lg focus:outline-none focus:ring-2 focus:ring-emerald-500"
-                  aria-haspopup="menu"
-                  aria-expanded={showUserMenu}
-                >
-                  {user?.avatar_url ? (
-                    <img
-                      src={user.avatar_url}
-                      alt="Profile"
-                      className="w-full h-full object-cover"
-                    />
-                  ) : (
-                    <div className="w-full h-full bg-gradient-to-r from-emerald-600 to-slate-600 flex items-center justify-center">
-                      {isAdmin ?
-                        <Shield className="w-5 h-5 text-white" /> :
-                        <User className="w-5 h-5 text-white" />
-                      }
-                    </div>
-                  )}
-                </button>
-                <button
-                  onClick={handleSignOut}
-                  className="hidden sm:inline-flex p-2 text-gray-500 hover:text-gray-700 rounded-lg hover:bg-gray-100 transition-colors"
-                  title="Sign Out"
-                >
-                  <LogOut className="w-5 h-5" />
-                </button>
-
-                {showUserMenu && (
-                  <div className="fixed sm:absolute top-16 sm:top-auto right-4 sm:right-0 left-4 sm:left-auto mt-2 sm:mt-2 bg-white w-auto sm:w-48 max-w-md rounded-lg shadow-lg border border-gray-200 z-50">
-                    <div className="py-2">
-                      <button
-                        onClick={() => {
-                          setActiveTab('profile');
-                          setShowUserMenu(false);
-                        }}
-                        className="w-full flex items-center space-x-2 px-4 py-2 text-left text-sm text-gray-700 hover:bg-gray-100"
-                      >
-                        <User className="w-4 h-4" />
-                        <span>Profile</span>
-                      </button>
-                      <button
-                        onClick={() => {
-                          setShowUserMenu(false);
-                          handleSignOut();
-                        }}
-                        className="w-full flex items-center space-x-2 px-4 py-2 text-left text-sm text-red-600 hover:bg-red-50"
-                      >
-                        <LogOut className="w-4 h-4" />
-                        <span>Sign Out</span>
-                      </button>
-                    </div>
-                  </div>
-                )}
-              </div>
+            {/* Right side - Simplified Header Actions */}
+            <div className="flex items-center space-x-2">
+              <button
+                onClick={handleSignOut}
+                className="p-2 text-gray-400 hover:text-gray-600 rounded-lg hover:bg-gray-50 transition-colors flex items-center space-x-2 group"
+                title="Sign Out"
+              >
+                <LogOut className="w-5 h-5 group-hover:scale-110 transition-transform" />
+                <span className="text-sm font-medium hidden sm:inline text-gray-600 group-hover:text-gray-900">Sign Out</span>
+              </button>
             </div>
           </div>
         </div>
@@ -3231,7 +3224,7 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
                         <span className="font-medium text-sm sm:text-base">{item.label}</span>
                       </div>
                       {item.badge > 0 && (
-                        <span className="bg-red-500 text-white text-xs rounded-full w-5 h-5 flex items-center justify-center flex-shrink-0">
+                        <span className="bg-emerald-600 text-white text-xs rounded-full w-5 h-5 flex items-center justify-center flex-shrink-0 border border-white shadow-sm">
                           {item.badge > 9 ? '9+' : item.badge}
                         </span>
                       )}
@@ -3251,7 +3244,7 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
                     />
                   </div>
                   <div className="min-w-0 flex-1">
-                    <p className="font-medium text-gray-900 truncate">{user?.full_name}</p>
+                    <p className="font-medium text-gray-900 truncate">{user?.first_name} {user?.last_name}</p>
                     <p className="text-sm text-gray-600 capitalize">{user?.role}</p>
                     {user?.email && (
                       <p className="text-xs text-gray-500 truncate">{user.email}</p>
@@ -3323,14 +3316,22 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
             <div className="w-14 h-14 bg-emerald-100 rounded-full flex items-center justify-center mx-auto mb-4">
               <Calendar className="w-7 h-7 text-emerald-600" />
             </div>
-            <h3 className="text-lg font-bold text-gray-900 mb-2">Confirm Booking</h3>
-            <p className="text-sm text-gray-500 mb-2">
-              Are you sure you want to schedule this duty?
+            <h3 className="text-lg font-bold text-gray-900 mb-2 uppercase tracking-tight">Are you sure?</h3>
+            <p className="text-sm text-gray-600 mb-2">
+              Confirm duty booking for:
             </p>
-            <p className="text-base font-semibold text-emerald-700 bg-emerald-50 rounded-xl px-4 py-2 mb-6">
-              {new Date(bookingToConfirm.date + 'T00:00:00').toLocaleDateString('en-US', {
-                weekday: 'long', year: 'numeric', month: 'long', day: 'numeric'
-              })}
+            <div className="bg-emerald-50 rounded-2xl p-4 mb-4 border border-emerald-100">
+              <p className="text-base font-bold text-emerald-800 mb-1">
+                {new Date(bookingToConfirm.date + 'T00:00:00').toLocaleDateString('en-US', {
+                  weekday: 'long', year: 'numeric', month: 'long', day: 'numeric'
+                })}
+              </p>
+              <p className="text-sm font-medium text-emerald-600 flex items-center justify-center gap-1">
+                <MapPin className="w-4 h-4" /> {bookingToConfirm.location || 'Hospital Location'}
+              </p>
+            </div>
+            <p className="text-xs font-bold text-red-600 bg-red-50 border border-red-100 rounded-lg py-2 px-3 mb-6 animate-pulse uppercase">
+              ⚠️ Confirmed booking cannot be undone
             </p>
             <div className="flex space-x-3">
               <button

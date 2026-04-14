@@ -1,5 +1,5 @@
 import { createClient } from '@supabase/supabase-js'
-
+import { sendSmsNotification, sendEmailNotification } from './externalNotifications'
 const supabaseUrl = process.env.REACT_APP_SUPABASE_URL
 const supabaseAnonKey = process.env.REACT_APP_SUPABASE_ANON_KEY
 
@@ -7,9 +7,24 @@ export const supabase = createClient(supabaseUrl, supabaseAnonKey)
 
 // Enhanced database helper functions with better error handling
 export const dbHelpers = {
+  // Helper to get current session user
+  getCurrentUser: async () => {
+    const { data: { user }, error } = await supabase.auth.getUser();
+    if (error || !user) return null;
+    
+    // Get full profile
+    const { data: profile } = await supabase
+      .from('profiles')
+      .select('*')
+      .eq('id', user.id)
+      .single();
+    
+    return profile;
+  },
+
   // Create user profile with role validation
   createProfile: async (userData) => {
-    const allowedRoles = ['admin', 'student', 'parent'];
+    const allowedRoles = ['admin', 'co-admin', 'student', 'parent'];
     if (!allowedRoles.includes(userData.role)) {
       throw new Error('Invalid role specified');
     }
@@ -51,11 +66,7 @@ export const dbHelpers = {
           student_id,
           booking_time,
           status,
-          profiles:student_id (
-            id,
-            full_name,
-            email
-          )
+          profiles:student_id (*)
         )
       `)
       .order('date', { ascending: true })
@@ -199,13 +210,15 @@ export const dbHelpers = {
         const { data: admins } = await supabase
           .from('profiles')
           .select('id')
-          .eq('role', 'admin');
+          .in('role', ['admin', 'co-admin']);
 
-        const { data: parents } = await supabase
-          .from('profiles')
-          .select('id')
-          .eq('role', 'parent')
-          .eq('student_id', studentId);
+        const { data: parentLinks } = await supabase
+          .from('parent_student_links')
+          .select('parent_id, profiles!parent_id(id, phone_number, email)')
+          .eq('student_id', studentId)
+          .eq('status', 'approved');
+
+        const parents = parentLinks?.map(link => link.profiles) || [];
 
         const dateStr = new Date(info.schedule_date + 'T00:00:00').toLocaleDateString('en-US', {
           year: 'numeric',
@@ -227,13 +240,33 @@ export const dbHelpers = {
         }
 
         if (parents && parents.length > 0) {
+          // Fetch student name for the external message
+          const { data: studentProfile } = await supabase
+            .from('profiles')
+            .select('first_name, last_name')
+            .eq('id', studentId)
+            .single();
+          
+          const studentName = studentProfile ? `${studentProfile.first_name} ${studentProfile.last_name}` : 'Your child';
+
           parents.forEach(parent => {
+            const message = `${studentName} has booked duty for ${dateStr}. Status: Pending Admin Approval.`;
+            
+            // In-app notification
             notifications.push({
               user_id: parent.id,
               title: 'Child Duty Booked',
-              message: `Your child has booked duty for ${dateStr}`,
+              message: message,
               type: 'info'
             });
+
+            // External notifications (SMS & Email)
+            if (parent.phone_number) {
+              sendSmsNotification(parent.phone_number, message);
+            }
+            if (parent.email) {
+              sendEmailNotification(parent.email, 'Child Duty Booked', message);
+            }
           });
         }
 
@@ -352,19 +385,29 @@ export const dbHelpers = {
   },
 
   // Get child's duties for parent access (view-only)
-  getChildDuties: async (parentId) => {
-    // First get the parent's profile to find linked student
-    const { data: parent, error: parentError } = await supabase
-      .from('profiles')
-      .select('student_id')
-      .eq('id', parentId)
-      .eq('role', 'parent')
-      .single();
+  getChildDuties: async (studentId, parentId) => {
+    // If no studentId provided, just return empty (parent must select a child)
+    if (!studentId) return [];
 
-    if (parentError) throw parentError;
-    if (!parent?.student_id) throw new Error('No linked student found for this parent');
+    let targetParentId = parentId;
+    if (!targetParentId) {
+      const user = await dbHelpers.getCurrentUser();
+      if (!user) throw new Error('Not authenticated');
+      targetParentId = user.id;
+    }
 
-    return await dbHelpers.getStudentDuties(parent.student_id);
+    // Verify parent is linked and approved for this child
+    const { data: link, error: linkError } = await supabase
+      .from('parent_student_links')
+      .select('id')
+      .eq('parent_id', targetParentId)
+      .eq('student_id', studentId)
+      .eq('status', 'approved')
+      .maybeSingle();
+
+    if (linkError || !link) throw new Error('You do not have permission to view this child\'s duties');
+
+    return await dbHelpers.getStudentDuties(studentId);
   },
 
   // Update schedule status with approval workflow
@@ -418,7 +461,7 @@ export const dbHelpers = {
           const notifications = scheduleStudents.map(ss => ({
             user_id: ss.student_id,
             title: 'Duty Schedule Approved',
-            message: `Your duty schedule for ${new Date(data.date).toLocaleDateString()} has been approved`,
+            message: `Duty schedule for ${new Date(data.date).toLocaleDateString()} has been approved`,
             type: 'success'
           }));
 
@@ -466,10 +509,12 @@ export const dbHelpers = {
         *,
         schedule_students (
           schedules (date, description),
-          profiles:student_id (full_name, email)
+          profiles:student_id (first_name, last_name, middle_initial, email)
         ),
         performed_by_profile:profiles!performed_by (
-          full_name,
+          first_name,
+          last_name,
+          middle_initial,
           email,
           role
         )
@@ -520,7 +565,7 @@ export const dbHelpers = {
       .select(`
         *,
         schedules!inner (date, description),
-        profiles!student_id (full_name, year_level)
+        profiles!student_id (first_name, last_name, middle_initial, year_level)
       `)
       .gte('schedules.date', startDate)
       .lte('schedules.date', endDate);
@@ -535,7 +580,8 @@ export const dbHelpers = {
 
     // Group by student
     const studentStats = data.reduce((acc, duty) => {
-      const studentName = duty.profiles?.full_name || 'Unknown';
+      const student = duty.profiles;
+      const studentName = student ? `${student.last_name}, ${student.first_name}${student.middle_initial ? ' ' + student.middle_initial : ''}` : 'Unknown';
       if (!acc[studentName]) {
         acc[studentName] = { total: 0, completed: 0, cancelled: 0 };
       }
@@ -575,7 +621,7 @@ export const dbHelpers = {
           updated_at: new Date().toISOString()
         })
         .eq('id', bookingId)
-        .select('*, profiles:student_id(full_name), schedules(date, location)')
+        .select('*, profiles:student_id(*), schedules(date, location)')
         .single();
 
       if (updateError) throw updateError;
@@ -587,7 +633,7 @@ export const dbHelpers = {
         action: 'approved_individual',
         performed_by: adminId,
         target_user: booking.student_id,
-        notes: `Admin approved booking for ${booking.profiles?.full_name || 'student'}`
+        notes: `Admin approved booking for ${booking.profiles ? `${booking.profiles.last_name}, ${booking.profiles.first_name}` : 'student'}`
       }]);
 
       // Create notification for student
@@ -601,9 +647,44 @@ export const dbHelpers = {
         await supabase.from('notifications').insert([{
           user_id: booking.student_id,
           title: 'Duty Booking Approved',
-          message: `Your duty booking for ${dateStr} at ${booking.schedules.location} has been approved`,
+          message: `Duty booking for ${dateStr} at ${booking.schedules.location} has been approved`,
           type: 'success'
         }]);
+
+        // Notify Parents (Internal + SMS + Email)
+        const { data: parentLinks } = await supabase
+          .from('parent_student_links')
+          .select('parent_id, profiles!parent_id(id, phone_number, email)')
+          .eq('student_id', booking.student_id)
+          .eq('status', 'approved');
+
+        const parents = parentLinks?.map(link => link.profiles) || [];
+
+        if (parents && parents.length > 0) {
+          const parentNotifications = [];
+          parents.forEach(parent => {
+            const student = booking.profiles;
+            const childName = student ? `${student.first_name} ${student.last_name}` : 'Child';
+            const message = `Hello, your child Name: ${childName} booked duty on Date: ${dateStr} and Time: 8:00 AM - 5:00 PM at ${booking.schedules.location}. The admin has approved this schedule.`;
+            parentNotifications.push({
+              user_id: parent.id,
+              title: 'Child Duty Approved',
+              message: message,
+              type: 'success'
+            });
+
+            if (parent.phone_number) {
+               sendSmsNotification(parent.phone_number, message);
+            }
+            if (parent.email) {
+               sendEmailNotification(parent.email, 'Child Duty Approved', message);
+            }
+          });
+
+          if (parentNotifications.length > 0) {
+            await supabase.from('notifications').insert(parentNotifications);
+          }
+        }
       } catch (notificationError) {
         console.warn('Failed to create notification:', notificationError);
       }
@@ -626,7 +707,7 @@ export const dbHelpers = {
       // Get all pending bookings for this schedule
       const { data: bookings, error: fetchError } = await supabase
         .from('schedule_students')
-        .select('id, student_id, profiles:student_id(full_name)')
+        .select('id, student_id, profiles:student_id(first_name, last_name, middle_initial)')
         .eq('schedule_id', scheduleId)
         .eq('status', 'booked');
 
@@ -656,7 +737,7 @@ export const dbHelpers = {
         action: 'approved_all',
         performed_by: adminId,
         target_user: booking.student_id,
-        notes: `Admin approved booking for ${booking.profiles?.full_name || 'student'} (bulk approval)`
+        notes: `Admin approved booking for ${booking.profiles ? `${booking.profiles.last_name}, ${booking.profiles.first_name}` : 'student'} (bulk approval)`
       }));
 
       await supabase.from('duty_logs').insert(logEntries);
@@ -673,11 +754,52 @@ export const dbHelpers = {
           const notifications = bookings.map(booking => ({
             user_id: booking.student_id,
             title: 'Duty Booking Approved',
-            message: `Your duty booking for ${dateStr} at ${updated[0].schedules.location} has been approved`,
+            message: `Duty booking for ${dateStr} at ${updated[0].schedules.location} has been approved`,
             type: 'success'
           }));
 
           await supabase.from('notifications').insert(notifications);
+
+          // Notify Parents
+          const studentIds = bookings.map(b => b.student_id);
+          const { data: parentLinks } = await supabase
+            .from('parent_student_links')
+            .select('student_id, parent_id, profiles!parent_id(id, phone_number, email)')
+            .in('student_id', studentIds)
+            .eq('status', 'approved');
+
+          const parents = parentLinks?.map(link => ({
+            ...link.profiles,
+            student_id: link.student_id
+          })) || [];
+
+          if (parents && parents.length > 0) {
+            const parentNotifications = [];
+            parents.forEach(parent => {
+              const relatedBooking = bookings.find(b => b.student_id === parent.student_id);
+              const student = relatedBooking?.profiles;
+              const childName = student ? `${student.first_name} ${student.last_name}` : 'Child';
+              const message = `Hello, your child Name: ${childName} booked duty on Date: ${dateStr} and Time: 8:00 AM - 5:00 PM at ${updated[0].schedules.location}. The admin has approved this schedule.`;
+              
+              parentNotifications.push({
+                user_id: parent.id,
+                title: 'Child Duty Approved',
+                message: message,
+                type: 'success'
+              });
+
+              if (parent.phone_number) {
+                sendSmsNotification(parent.phone_number, message);
+              }
+              if (parent.email) {
+                sendEmailNotification(parent.email, 'Child Duty Approved', message);
+              }
+            });
+
+            if (parentNotifications.length > 0) {
+              await supabase.from('notifications').insert(parentNotifications);
+            }
+          }
         }
       } catch (notificationError) {
         console.warn('Failed to create notifications:', notificationError);
@@ -707,7 +829,7 @@ export const dbHelpers = {
           cancellation_reason: reason
         })
         .eq('id', bookingId)
-        .select('*, profiles:student_id(full_name), schedules(date, location)')
+        .select('*, profiles:student_id(first_name, last_name, middle_initial), schedules(date, location)')
         .single();
 
       if (updateError) throw updateError;
@@ -719,7 +841,7 @@ export const dbHelpers = {
         action: 'rejected_individual',
         performed_by: adminId,
         target_user: booking.student_id,
-        notes: `Admin rejected booking for ${booking.profiles?.full_name || 'student'}: ${reason}`
+        notes: `Admin rejected booking for ${booking.profiles ? `${booking.profiles.last_name}, ${booking.profiles.first_name}` : 'student'}: ${reason}`
       }]);
 
       // Create notification for student
@@ -733,7 +855,7 @@ export const dbHelpers = {
         await supabase.from('notifications').insert([{
           user_id: booking.student_id,
           title: 'Duty Booking Rejected',
-          message: `Your duty booking for ${dateStr} at ${booking.schedules.location} has been rejected. Reason: ${reason}`,
+          message: `Duty booking for ${dateStr} at ${booking.schedules.location} has been rejected. Reason: ${reason}`,
           type: 'error'
         }]);
       } catch (notificationError) {
@@ -759,7 +881,7 @@ export const dbHelpers = {
       // Get all pending bookings
       const { data: bookings, error: fetchError } = await supabase
         .from('schedule_students')
-        .select('id, student_id, profiles:student_id(full_name)')
+        .select('id, student_id, profiles:student_id(first_name, last_name, middle_initial)')
         .eq('schedule_id', scheduleId)
         .eq('status', 'booked');
 
@@ -790,7 +912,7 @@ export const dbHelpers = {
         action: 'rejected_all',
         performed_by: adminId,
         target_user: booking.student_id,
-        notes: `Admin rejected booking for ${booking.profiles?.full_name || 'student'} (bulk rejection): ${reason}`
+        notes: `Admin rejected booking for ${booking.profiles ? `${booking.profiles.last_name}, ${booking.profiles.first_name}` : 'student'} (bulk rejection): ${reason}`
       }));
 
       await supabase.from('duty_logs').insert(logEntries);
@@ -807,7 +929,7 @@ export const dbHelpers = {
           const notifications = bookings.map(booking => ({
             user_id: booking.student_id,
             title: 'Duty Booking Rejected',
-            message: `Your duty booking for ${dateStr} at ${updated[0].schedules.location} has been rejected. Reason: ${reason}`,
+            message: `Duty booking for ${dateStr} at ${updated[0].schedules.location} has been rejected. Reason: ${reason}`,
             type: 'error'
           }));
 
@@ -846,7 +968,9 @@ export const dbHelpers = {
           ),
           profiles:student_id (
             id,
-            full_name,
+            first_name,
+            last_name,
+            middle_initial,
             email,
             student_number,
             year_level
@@ -882,7 +1006,9 @@ export const dbHelpers = {
           *,
           profiles:student_id (
             id,
-            full_name,
+            first_name,
+            last_name,
+            middle_initial,
             email,
             student_number,
             year_level
@@ -925,5 +1051,247 @@ export const dbHelpers = {
       console.error('Error fetching booking stats:', error);
       return { data: null, error };
     }
+  },
+
+  /**
+   * Send a notification to all registered students
+   */
+  notifyAllStudents: async (adminId, title, message) => {
+    try {
+      // Get all students
+      const { data: students, error: studentError } = await supabase
+        .from('profiles')
+        .select('id')
+        .eq('role', 'student');
+
+      if (studentError) throw studentError;
+      if (!students || students.length === 0) return { success: true, count: 0 };
+
+      // Batch insert notifications
+      const notifications = students.map(s => ({
+        user_id: s.id,
+        title,
+        message,
+        type: 'info',
+        read: false,
+        created_at: new Date().toISOString()
+      }));
+
+      const { error: notifyError } = await supabase.from('notifications').insert(notifications);
+      if (notifyError) throw notifyError;
+
+      // Log the broadcast
+      try {
+        await supabase.from('duty_logs').insert([{
+          action: 'broadcast_notification',
+          performed_by: adminId,
+          notes: `System Broadcast: ${title}`
+        }]);
+      } catch (logErr) {}
+
+      return { success: true, count: students.length };
+    } catch (error) {
+      console.error('Error in notifyAllStudents:', error);
+      return { success: false, error };
+    }
+  },
+
+  // ============================================================================
+  // PARENT-STUDENT LINKING FUNCTIONS
+  // ============================================================================
+
+  /**
+   * Request to link a parent to a student using student number
+   */
+  requestParentStudentLink: async (studentNumber) => {
+    try {
+      const user = await dbHelpers.getCurrentUser();
+      if (!user) throw new Error('Not authenticated');
+
+      // 1. Find the student by student number (case-insensitive)
+      const { data: student, error: studentError } = await supabase
+        .from('profiles')
+        .select('id, first_name, last_name')
+        .ilike('student_number', studentNumber)
+        .eq('role', 'student')
+        .single();
+
+      if (studentError || !student) {
+        throw new Error('Student not found with that student number');
+      }
+
+      // 2. Check if link already exists
+      const { data: existing } = await supabase
+        .from('parent_student_links')
+        .select('id, status')
+        .eq('parent_id', user.id)
+        .eq('student_id', student.id)
+        .maybeSingle();
+
+      if (existing) {
+        if (existing.status === 'approved') throw new Error('You are already linked to this student');
+        if (existing.status === 'pending') throw new Error('A link request is already pending for this student');
+        // If declined, we allow re-requesting (status will be updated to pending)
+      }
+
+      // 3. Create or update the link request
+      const { error } = await supabase
+        .from('parent_student_links')
+        .upsert([{
+          parent_id: user.id,
+          student_id: student.id,
+          status: 'pending',
+          updated_at: new Date().toISOString()
+        }])
+        .select()
+        .single();
+
+      if (error) throw error;
+
+      // 4. Notify admins of new request
+      try {
+        const { data: admins } = await supabase.from('profiles').select('id').in('role', ['admin', 'co-admin']);
+        if (admins) {
+          const notifications = admins.map(admin => ({
+            user_id: admin.id,
+            title: 'New Parent-Student Link Request',
+            message: `A parent has requested to link with student ${student.first_name} ${student.last_name}`,
+            type: 'info'
+          }));
+          await supabase.from('notifications').insert(notifications);
+        }
+      } catch (e) {}
+
+      return { success: true, message: 'Link request sent!' };
+    } catch (error) {
+      console.error('Error requesting link:', error);
+      return { success: false, error: error.message };
+    }
+  },
+
+  /**
+   * Get all children linked to a parent
+   */
+  getLinkedChildren: async (parentId) => {
+    try {
+      let targetParentId = parentId;
+      
+      if (!targetParentId) {
+        const user = await dbHelpers.getCurrentUser();
+        if (!user) throw new Error('Not authenticated');
+        targetParentId = user.id;
+      }
+
+      const { data, error } = await supabase
+        .from('parent_student_links')
+        .select(`
+          id,
+          status,
+          student_id,
+          student:profiles!student_id (
+            id, first_name, last_name, middle_initial, student_number, email, avatar_url
+          )
+        `)
+        .eq('parent_id', targetParentId);
+
+      if (error) throw error;
+      return { data: data || [], error: null };
+    } catch (error) {
+      console.error('Error getting linked children:', error);
+      return { data: null, error };
+    }
+  },
+
+  /**
+   * Get all pending link requests (Admin only)
+   */
+  getPendingLinkRequests: async () => {
+    try {
+      const { data, error } = await supabase
+        .from('parent_student_links')
+        .select(`
+          *,
+          parent:profiles!parent_id (first_name, last_name, email),
+          student:profiles!student_id (first_name, last_name, student_number)
+        `)
+        .eq('status', 'pending')
+        .order('created_at', { ascending: false });
+
+      if (error) throw error;
+      return { data: data || [], error: null };
+    } catch (error) {
+      console.error('Error getting pending requests:', error);
+      return { data: null, error };
+    }
+  },
+
+  /**
+   * Approve or Decline link request
+   */
+  handleLinkRequest: async (linkId, status, adminId) => {
+    try {
+      const { data: link, error: updateError } = await supabase
+        .from('parent_student_links')
+        .update({ status, updated_at: new Date().toISOString() })
+        .eq('id', linkId)
+        .select('*, parent:profiles!parent_id(first_name), student:profiles!student_id(first_name, last_name)')
+        .single();
+
+      if (updateError) throw updateError;
+
+      // Notify parent
+      await supabase.from('notifications').insert([{
+        user_id: link.parent_id,
+        title: status === 'approved' ? 'Link Request Approved' : 'Link Request Declined',
+        message: status === 'approved' 
+          ? `Your request to link with ${link.student.first_name} ${link.student.last_name} has been approved.` 
+          : `Your request to link with ${link.student.first_name} ${link.student.last_name} was declined.`,
+        type: status === 'approved' ? 'success' : 'error'
+      }]);
+
+      return { data: link, error: null };
+    } catch (error) {
+      console.error('Error handling link request:', error);
+      return { data: null, error };
+    }
+  },
+
+  /**
+   * Get all hospital locations from system_settings
+   */
+  getHospitalLocations: async () => {
+    try {
+      const { data, error } = await supabase
+        .from('system_settings')
+        .select('value')
+        .eq('key', 'hospital_locations')
+        .single();
+      
+      if (error) throw error;
+      return { data: data ? JSON.parse(data.value) : [], error: null };
+    } catch (error) {
+      console.error('Error fetching hospital locations:', error);
+      return { data: null, error };
+    }
+  },
+
+  /**
+   * Update hospital locations in system_settings
+   */
+  updateHospitalLocations: async (locations) => {
+    try {
+      const { data, error } = await supabase
+        .from('system_settings')
+        .update({ value: JSON.stringify(locations), updated_at: new Date().toISOString() })
+        .eq('key', 'hospital_locations')
+        .select()
+        .single();
+
+      if (error) throw error;
+      return { data: data ? JSON.parse(data.value) : [], error: null };
+    } catch (error) {
+      console.error('Error updating hospital locations:', error);
+      return { data: null, error };
+    }
   }
-}
+}

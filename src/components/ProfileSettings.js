@@ -3,19 +3,19 @@ import React, { useState, useEffect, useRef } from 'react';
 import { supabase } from '../lib/supabase';
 import {
   User,
-  Mail,
-  Phone,
-  Lock,
   Shield,
   Save,
-  Camera,
   Eye,
   EyeOff,
   Check,
   AlertCircle,
-  GraduationCap,
   Upload,
-  Trash2
+  Trash2,
+  Database,
+  Plus,
+  X,
+  MapPin,
+  Power
 } from 'lucide-react';
 
 /* ── Sub-components defined OUTSIDE to prevent remount on parent re-render ── */
@@ -37,7 +37,7 @@ const AvatarDisplay = ({ avatarPreview, avatarUrl, userName, size = 'large' }) =
   return (
     <div className={`${sizeClasses[size]} bg-gradient-to-r from-emerald-500 to-green-500 rounded-full flex items-center justify-center border-2 border-white shadow-lg`}>
       <span className="text-white font-bold">
-        {userName?.split(' ').map(n => n[0]).join('').substring(0, 2)}
+        {userName}
       </span>
     </div>
   );
@@ -58,7 +58,7 @@ const PersonalInfoTab = ({
           <AvatarDisplay
             avatarPreview={avatarUpload.preview}
             avatarUrl={profileData.avatar_url}
-            userName={profileData.full_name}
+            userName={(profileData.first_name?.[0] || '') + (profileData.last_name?.[0] || '')}
             size="large"
           />
           {avatarUpload.uploading && (
@@ -98,77 +98,84 @@ const PersonalInfoTab = ({
     </div>
 
     <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-      <div>
-        <label className="block text-sm font-medium text-gray-700 mb-2">Full Name</label>
-        <div className="relative">
-          <User className="w-5 h-5 absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
+      <div className="md:col-span-2 grid grid-cols-1 md:grid-cols-5 gap-4">
+        <div className="md:col-span-2">
+          <label className="block text-sm font-medium text-gray-700 mb-2">First Name</label>
           <input
             type="text"
-            value={profileData.full_name}
-            onChange={(e) => setProfileData({ ...profileData, full_name: e.target.value })}
-            className="input-field pl-10"
+            value={profileData.first_name}
+            onChange={(e) => setProfileData({ ...profileData, first_name: e.target.value })}
+            className="input-field"
             required
+          />
+        </div>
+        <div className="md:col-span-2">
+          <label className="block text-sm font-medium text-gray-700 mb-2">Last Name</label>
+          <input
+            type="text"
+            value={profileData.last_name}
+            onChange={(e) => setProfileData({ ...profileData, last_name: e.target.value })}
+            className="input-field"
+            required
+          />
+        </div>
+        <div className="md:col-span-1">
+          <label className="block text-sm font-medium text-gray-700 mb-2">M.I.</label>
+          <input
+            type="text"
+            value={profileData.middle_initial}
+            onChange={(e) => setProfileData({ ...profileData, middle_initial: e.target.value })}
+            className="input-field text-center"
+            maxLength={2}
           />
         </div>
       </div>
 
       <div>
         <label className="block text-sm font-medium text-gray-700 mb-2">Email Address</label>
-        <div className="relative">
-          <Mail className="w-5 h-5 absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
-          <input
-            type="email"
-            value={profileData.email}
-            className="input-field pl-10 bg-gray-50"
-            disabled
-          />
-        </div>
+        <input
+          type="email"
+          value={profileData.email}
+          className="input-field bg-gray-50"
+          disabled
+        />
         <p className="text-xs text-gray-500 mt-1">Email cannot be changed. Contact admin if needed.</p>
       </div>
 
       <div>
         <label className="block text-sm font-medium text-gray-700 mb-2">Phone Number *</label>
-        <div className="relative">
-          <Phone className="w-5 h-5 absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
-          <input
-            type="tel"
-            value={profileData.phone_number}
-            onChange={(e) => setProfileData({ ...profileData, phone_number: e.target.value })}
-            className="input-field pl-10"
-            placeholder="09123456789"
-            required
-          />
-        </div>
+        <input
+          type="tel"
+          value={profileData.phone_number}
+          onChange={(e) => setProfileData({ ...profileData, phone_number: e.target.value })}
+          className="input-field"
+          placeholder="09123456789"
+          required
+        />
         <p className="text-xs text-gray-500 mt-1">Contact number is required for emergency notifications</p>
       </div>
 
       <div>
         <label className="block text-sm font-medium text-gray-700 mb-2">Role</label>
-        <div className="relative">
-          <Shield className="w-5 h-5 absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
-          <input
-            type="text"
-            value={profileData.role?.charAt(0).toUpperCase() + profileData.role?.slice(1)}
-            className="input-field pl-10 bg-gray-50 capitalize"
-            disabled
-          />
-        </div>
+        <input
+          type="text"
+          value={profileData.role?.charAt(0).toUpperCase() + profileData.role?.slice(1)}
+          className="input-field bg-gray-50 capitalize"
+          disabled
+        />
       </div>
 
       {userRole === 'student' && (
         <>
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-2">Student Number</label>
-            <div className="relative">
-              <GraduationCap className="w-5 h-5 absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
-              <input
-                type="text"
-                value={profileData.student_number}
-                onChange={(e) => setProfileData({ ...profileData, student_number: e.target.value })}
-                className="input-field pl-10"
-                placeholder="2024-12345"
-              />
-            </div>
+            <input
+              type="text"
+              value={profileData.student_number}
+              onChange={(e) => setProfileData({ ...profileData, student_number: e.target.value })}
+              className="input-field"
+              placeholder="2024-12345"
+            />
           </div>
 
           <div>
@@ -224,12 +231,11 @@ const SecurityTab = ({
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-2">Current Password</label>
             <div className="relative">
-              <Lock className="w-5 h-5 absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
               <input
                 type={showPasswords.current ? 'text' : 'password'}
                 value={passwordData.current_password}
                 onChange={(e) => setPasswordData({ ...passwordData, current_password: e.target.value })}
-                className="input-field pl-10 pr-10"
+                className="input-field pr-10"
                 required
               />
               <button
@@ -245,12 +251,11 @@ const SecurityTab = ({
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-2">New Password</label>
             <div className="relative">
-              <Lock className="w-5 h-5 absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
               <input
                 type={showPasswords.new ? 'text' : 'password'}
                 value={passwordData.new_password}
                 onChange={(e) => setPasswordData({ ...passwordData, new_password: e.target.value })}
-                className="input-field pl-10 pr-10"
+                className="input-field pr-10"
                 required
               />
               <button
@@ -266,12 +271,11 @@ const SecurityTab = ({
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-2">Confirm New Password</label>
             <div className="relative">
-              <Lock className="w-5 h-5 absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
               <input
                 type={showPasswords.confirm ? 'text' : 'password'}
                 value={passwordData.confirm_password}
                 onChange={(e) => setPasswordData({ ...passwordData, confirm_password: e.target.value })}
-                className="input-field pl-10 pr-10"
+                className="input-field pr-10"
                 required
               />
               <button
@@ -329,6 +333,79 @@ const SecurityTab = ({
   </div>
 );
 
+const SystemAdminTab = ({
+  locations, handleLocationAdd, handleLocationDelete,
+  bookingStatus, handleToggleBookingStatus,
+  savingSystem, fetchingSystem,
+  newLocName, setNewLocName, newLocCap, setNewLocCap
+}) => (
+  <div className="space-y-6">
+    {fetchingSystem ? (
+       <div className="flex justify-center p-8"><div className="animate-spin rounded-full h-8 w-8 border-b-2 border-emerald-500"></div></div>
+    ) : (
+      <>
+        {/* Module: Open Scheduling Toggle */}
+        <div className="border border-gray-200 rounded-lg p-6 bg-white shadow-sm">
+          <div className="flex items-center justify-between mb-4">
+            <div>
+              <h3 className="text-lg font-medium text-gray-900 flex items-center gap-2"><Power className="w-5 h-5 text-emerald-600" /> Booking System Master Switch</h3>
+              <p className="text-sm text-gray-600 mt-1">Globally enable or disable the ability for students to book new duties.</p>
+            </div>
+            <button
+              onClick={handleToggleBookingStatus}
+              disabled={savingSystem}
+              className={`relative inline-flex h-7 w-14 items-center rounded-full transition-colors focus:outline-none ${bookingStatus === 'open' ? 'bg-emerald-500' : 'bg-gray-300'}`}
+            >
+              <span className={`inline-block h-5 w-5 transform rounded-full bg-white transition-transform ${bookingStatus === 'open' ? 'translate-x-8' : 'translate-x-1'}`} />
+            </button>
+          </div>
+          <div className={`p-3 rounded-lg text-sm font-medium flex items-center gap-2 ${bookingStatus === 'open' ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-700'}`}>
+             <span className={`w-2 h-2 rounded-full ${bookingStatus === 'open' ? 'bg-emerald-500' : 'bg-amber-500'}`}></span>
+             System is currently {bookingStatus === 'open' ? 'OPEN' : 'CLOSED'} for new student bookings.
+          </div>
+        </div>
+
+        {/* Module: Hospital Locations */}
+        <div className="border border-gray-200 rounded-lg p-6 bg-white shadow-sm">
+          <div className="mb-4">
+            <h3 className="text-lg font-medium text-gray-900 flex items-center gap-2"><MapPin className="w-5 h-5 text-emerald-600" /> Hospital Locations Config</h3>
+            <p className="text-sm text-gray-600 mt-1">Manage dynamic locations available for duty schedules. Delete unused locations or add new ones.</p>
+          </div>
+          
+          <form className="flex items-end gap-3 mb-6 bg-gray-50 p-4 rounded-lg border border-gray-100" onSubmit={(e) => { e.preventDefault(); handleLocationAdd(); }}>
+            <div className="flex-1">
+               <label className="block text-xs font-medium text-gray-500 mb-1">New Location Name</label>
+               <input type="text" className="input-field py-2 text-sm" placeholder="e.g. RHU - XYZ" value={newLocName} onChange={(e) => setNewLocName(e.target.value)} required />
+            </div>
+            <div className="w-32">
+               <label className="block text-xs font-medium text-gray-500 mb-1">Default Slots</label>
+               <input type="number" min="1" className="input-field py-2 text-sm" value={newLocCap} onChange={(e) => setNewLocCap(e.target.value)} required />
+            </div>
+            <button type="submit" disabled={savingSystem} className="btn-primary py-2 px-4 flex items-center gap-2 h-[38px]">
+              <Plus className="w-4 h-4" /> Add
+            </button>
+          </form>
+
+          <div className="space-y-2 max-h-[300px] overflow-y-auto pr-2 custom-scrollbar">
+            {locations.map((loc, idx) => (
+              <div key={idx} className="flex items-center justify-between p-3 bg-white border border-gray-100 rounded-lg hover:border-emerald-200 hover:shadow-sm transition-all group">
+                 <div>
+                   <p className="font-medium text-gray-900 text-sm">{loc.name}</p>
+                   <p className="text-xs text-gray-500">Default slots: {loc.capacity}</p>
+                 </div>
+                 <button onClick={() => handleLocationDelete(idx)} disabled={savingSystem} className="p-2 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors opacity-0 group-hover:opacity-100">
+                   <X className="w-4 h-4" />
+                 </button>
+              </div>
+            ))}
+            {locations.length === 0 && <p className="text-sm text-gray-400 text-center py-4">No locations configured.</p>}
+          </div>
+        </div>
+      </>
+    )}
+  </div>
+);
+
 /* ── Main Component ── */
 
 const ProfileSettings = ({ user, onProfileUpdate }) => {
@@ -338,7 +415,9 @@ const ProfileSettings = ({ user, onProfileUpdate }) => {
   const fileInputRef = useRef(null);
 
   const [profileData, setProfileData] = useState({
-    full_name: user?.full_name || '',
+    first_name: user?.first_name || '',
+    last_name: user?.last_name || '',
+    middle_initial: user?.middle_initial || '',
     email: user?.email || '',
     phone_number: user?.phone_number || '',
     student_number: user?.student_number || '',
@@ -365,10 +444,22 @@ const ProfileSettings = ({ user, onProfileUpdate }) => {
     confirm: false
   });
 
+  // System Administration States
+  const [locations, setLocations] = useState([]);
+  const [bookingStatus, setBookingStatus] = useState('open');
+  const [fetchingSystem, setFetchingSystem] = useState(false);
+  const [savingSystem, setSavingSystem] = useState(false);
+  const [newLocName, setNewLocName] = useState('');
+  const [newLocCap, setNewLocCap] = useState(4);
+
+  const isAdmin = user?.role === 'admin' || user?.role === 'co-admin';
+
   useEffect(() => {
     if (user) {
       setProfileData({
-        full_name: user.full_name || '',
+        first_name: user.first_name || '',
+        last_name: user.last_name || '',
+        middle_initial: user.middle_initial || '',
         email: user.email || '',
         phone_number: user.phone_number || '',
         student_number: user.student_number || '',
@@ -376,8 +467,80 @@ const ProfileSettings = ({ user, onProfileUpdate }) => {
         role: user.role || '',
         avatar_url: user.avatar_url || ''
       });
+      if (isAdmin) {
+        fetchSystemSettings();
+      }
     }
   }, [user]);
+
+  const fetchSystemSettings = async () => {
+    setFetchingSystem(true);
+    try {
+      const { data, error } = await supabase.from('system_settings').select('*');
+      if (error) throw error;
+      if (data) {
+        const bl = data.find(item => item.key === 'hospital_locations');
+        if (bl) setLocations(JSON.parse(bl.value));
+        const bs = data.find(item => item.key === 'booking_system_status');
+        if (bs) setBookingStatus(bs.value);
+      }
+    } catch (err) {
+      console.error('Error fetching system settings:', err);
+      setMessage({ type: 'error', text: 'Failed to load system settings' });
+    } finally {
+      setFetchingSystem(false);
+    }
+  };
+
+  const handleToggleBookingStatus = async () => {
+    const newStatus = bookingStatus === 'open' ? 'closed' : 'open';
+    setSavingSystem(true);
+    try {
+      const { error } = await supabase.from('system_settings').upsert({ key: 'booking_system_status', value: newStatus }, { onConflict: 'key' });
+      if (error) throw error;
+      setBookingStatus(newStatus);
+      setMessage({ type: 'success', text: `Booking system is now ${newStatus}.` });
+    } catch (err) {
+      setMessage({ type: 'error', text: 'Error toggling system: ' + err.message });
+    } finally {
+      setSavingSystem(false);
+    }
+  };
+
+  const handleLocationAdd = async () => {
+    if (!newLocName.trim()) return;
+    setSavingSystem(true);
+    const updatedLocs = [...locations, { name: newLocName, capacity: parseInt(newLocCap) || 4, description: newLocName }];
+    try {
+      const { error } = await supabase.from('system_settings').upsert({ key: 'hospital_locations', value: JSON.stringify(updatedLocs) }, { onConflict: 'key' });
+      if (error) throw error;
+      setLocations(updatedLocs);
+      setNewLocName('');
+      setNewLocCap(4);
+      setMessage({ type: 'success', text: 'Location added successfully.' });
+    } catch (err) {
+      setMessage({ type: 'error', text: 'Error adding location: ' + err.message });
+    } finally {
+      setSavingSystem(false);
+    }
+  };
+
+  const handleLocationDelete = async (idx) => {
+    if (!window.confirm('Are you sure you want to remove this location type?')) return;
+    setSavingSystem(true);
+    const updatedLocs = [...locations];
+    updatedLocs.splice(idx, 1);
+    try {
+      const { error } = await supabase.from('system_settings').upsert({ key: 'hospital_locations', value: JSON.stringify(updatedLocs) }, { onConflict: 'key' });
+      if (error) throw error;
+      setLocations(updatedLocs);
+      setMessage({ type: 'success', text: 'Location removed successfully.' });
+    } catch (err) {
+      setMessage({ type: 'error', text: 'Error removing location: ' + err.message });
+    } finally {
+      setSavingSystem(false);
+    }
+  };
 
   const handleAvatarSelect = (event) => {
     const file = event.target.files[0];
@@ -451,15 +614,37 @@ const ProfileSettings = ({ user, onProfileUpdate }) => {
       if (avatarUpload.file) avatarUrl = await uploadAvatar();
       const { data: { user: currentUser }, error: authError } = await supabase.auth.getUser();
       if (authError || !currentUser) throw new Error('Authentication required. Please log in again.');
-      const { error } = await supabase.from('profiles').update({
-        full_name: profileData.full_name,
+      const updateData = {
+        first_name: profileData.first_name,
+        last_name: profileData.last_name,
+        middle_initial: profileData.middle_initial,
         phone_number: profileData.phone_number,
         student_number: profileData.student_number,
         year_level: profileData.year_level,
         avatar_url: avatarUrl,
         updated_at: new Date().toISOString()
-      }).eq('id', currentUser.id).eq('email', currentUser.email);
-      if (error) {
+      };
+
+      const { error } = await supabase
+        .from('profiles')
+        .update(updateData)
+        .eq('id', currentUser.id);
+
+      if (error && error.code === 'PGRST204') {
+        const fallbackData = {
+          full_name: `${profileData.first_name} ${profileData.last_name}`.trim(),
+          phone_number: profileData.phone_number,
+          student_number: profileData.student_number,
+          year_level: profileData.year_level,
+          avatar_url: avatarUrl,
+          updated_at: new Date().toISOString()
+        };
+        const { error: fError } = await supabase
+          .from('profiles')
+          .update(fallbackData)
+          .eq('id', currentUser.id);
+        if (fError) throw fError;
+      } else if (error) {
         if (error.code === '42501' || error.message.includes('row-level security'))
           throw new Error('Permission denied. Please contact administrator if this persists.');
         throw error;
@@ -505,15 +690,11 @@ const ProfileSettings = ({ user, onProfileUpdate }) => {
   const tabs = [
     { id: 'personal', label: 'Personal Info', icon: User },
     { id: 'security', label: 'Security', icon: Shield },
+    ...(isAdmin ? [{ id: 'system', label: 'System Admin', icon: Database }] : [])
   ];
 
   return (
     <div className="space-y-6">
-      <div>
-        <h2 className="text-2xl font-bold text-gray-900">Profile Settings</h2>
-        <p className="text-gray-600">Manage your account settings and preferences</p>
-      </div>
-
       {message.text && (
         <div className={`flex items-center space-x-2 p-4 rounded-lg border ${
           message.type === 'success'
@@ -526,25 +707,9 @@ const ProfileSettings = ({ user, onProfileUpdate }) => {
       )}
 
       <div className="card">
-        <div className="flex items-center space-x-4 mb-6">
-          <AvatarDisplay
-            avatarPreview={avatarUpload.preview}
-            avatarUrl={profileData.avatar_url}
-            userName={user?.full_name}
-            size="large"
-          />
-          <div>
-            <h3 className="text-xl font-semibold text-gray-900">{user?.full_name}</h3>
-            <p className="text-gray-600 capitalize">{user?.role}</p>
-            <p className="text-sm text-gray-500">{user?.email}</p>
-          </div>
-          <button
-            onClick={() => fileInputRef.current?.click()}
-            className="ml-auto p-2 text-gray-400 hover:text-gray-600 rounded-lg hover:bg-gray-100 transition-colors"
-            title="Upload new avatar"
-          >
-            <Camera className="w-5 h-5" />
-          </button>
+        <div className="mb-6">
+          <h2 className="text-xl font-bold text-gray-900">Account Settings</h2>
+          <p className="text-sm text-gray-500">Manage your profile and security preferences below.</p>
         </div>
 
         <input
@@ -595,6 +760,14 @@ const ProfileSettings = ({ user, onProfileUpdate }) => {
             saving={saving}
             handlePasswordSubmit={handlePasswordSubmit}
             user={user}
+          />
+        )}
+        {activeTab === 'system' && isAdmin && (
+          <SystemAdminTab
+            locations={locations} handleLocationAdd={handleLocationAdd} handleLocationDelete={handleLocationDelete}
+            bookingStatus={bookingStatus} handleToggleBookingStatus={handleToggleBookingStatus}
+            savingSystem={savingSystem} fetchingSystem={fetchingSystem}
+            newLocName={newLocName} setNewLocName={setNewLocName} newLocCap={newLocCap} setNewLocCap={setNewLocCap}
           />
         )}
       </div>
