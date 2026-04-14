@@ -809,20 +809,28 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
   };
 
   const handleNotificationClick = async (notification) => {
-    if (!notification.read) {
-      try {
-        await supabase
-          .from('notifications')
-          .update({ read: true, read_at: new Date().toISOString() })
-          .eq('id', notification.id);
+    try {
+      // Mark all notifications as read in Supabase for this specific user
+      const { error } = await supabase
+        .from('notifications')
+        .update({ read: true, read_at: new Date().toISOString() })
+        .eq('user_id', user.id)
+        .eq('read', false);
 
-        setNotifications(prev =>
-          prev.map(n => n.id === notification.id ? { ...n, read: true } : n)
-        );
-        setUnreadCount(prev => Math.max(0, prev - 1));
-      } catch (error) {
-        console.error('Error marking notification as read:', error);
-      }
+      if (error) throw error;
+
+      // Efficiently update local state to reflect all are now read
+      setNotifications(prev =>
+        prev.map(n => ({ ...n, read: true }))
+      );
+      
+      // Clear the unread count badge
+      setUnreadCount(0);
+      
+      // If we need to navigate or perform an action for the specific clicked notification,
+      // that logic can still proceed here if necessary in the future.
+    } catch (error) {
+      console.error('Error marking all notifications as read:', error);
     }
   };
 

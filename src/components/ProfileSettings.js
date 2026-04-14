@@ -82,7 +82,7 @@ const PersonalInfoTab = ({
               <button
                 type="button"
                 onClick={removeAvatar}
-                className="btn-secondary text-red-600 hover:bg-red-50 flex items-center space-x-2"
+                className="bg-red-500 hover:bg-red-600 text-white font-medium py-2 px-4 rounded-lg transition-colors flex items-center space-x-2 shadow-sm"
               >
                 <Trash2 className="w-4 h-4" />
                 <span>Remove</span>
