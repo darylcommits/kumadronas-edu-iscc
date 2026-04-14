@@ -106,6 +106,77 @@ const ViewStudentModal = ({ student, onClose }) => {
   );
 };
 
+const DayDetailsModal = ({ date, schedules, onClose }) => {
+  const dateStr = date.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
+  
+  const allBookings = [];
+  schedules.forEach(schedule => {
+    const activeBookings = schedule.schedule_students?.filter(ss => ss.status !== 'cancelled') || [];
+    activeBookings.forEach(booking => {
+      allBookings.push({
+        ...booking,
+        scheduleInfo: schedule
+      });
+    });
+  });
+
+  return (
+    <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-[60] flex items-center justify-center p-4" onClick={onClose}>
+      <div className="bg-white rounded-3xl shadow-2xl w-full max-w-2xl overflow-hidden animate-in fade-in zoom-in duration-200 flex flex-col max-h-[85vh]" onClick={e => e.stopPropagation()}>
+        <div className="bg-emerald-600 p-6 text-white flex justify-between items-center relative">
+          <div>
+            <h3 className="text-2xl font-bold">Duty Roster</h3>
+            <p className="text-emerald-100 text-sm">{dateStr}</p>
+          </div>
+          <button onClick={onClose} className="p-2 hover:bg-white/20 rounded-full transition-colors">
+            <X className="w-6 h-6" />
+          </button>
+        </div>
+        
+        <div className="p-6 overflow-y-auto custom-scrollbar flex-1">
+          {allBookings.length === 0 ? (
+             <div className="text-center py-12">
+               <Users className="w-16 h-16 text-gray-200 mx-auto mb-4" />
+               <p className="text-gray-500 font-medium text-lg">No students on duty for this date.</p>
+             </div>
+          ) : (
+            <div className="space-y-4">
+              {allBookings.map((booking, idx) => (
+                <div key={idx} className="flex items-center space-x-4 p-4 border border-gray-100 rounded-2xl bg-gray-50/50 hover:bg-emerald-50/50 transition-colors">
+                  <div className="w-14 h-14 bg-emerald-100 text-emerald-700 rounded-full flex items-center justify-center font-bold text-xl border border-emerald-200 overflow-hidden shrink-0">
+                    {booking.profiles?.avatar_url 
+                      ? <img src={booking.profiles.avatar_url} alt="" className="w-full h-full object-cover" />
+                      : (booking.profiles?.first_name?.[0] || '') + (booking.profiles?.last_name?.[0] || '')}
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <h4 className="font-bold text-gray-900 text-lg truncate">
+                      {booking.profiles?.first_name} {booking.profiles?.middle_initial ? booking.profiles.middle_initial + '. ' : ''}{booking.profiles?.last_name}
+                    </h4>
+                    <div className="flex items-center space-x-3 text-sm text-gray-500 mt-1">
+                      <span className="flex items-center"><MapPin className="w-4 h-4 mr-1 text-gray-400" />{booking.scheduleInfo?.location}</span>
+                      <span>•</span>
+                      <span className="flex items-center"><Clock className="w-4 h-4 mr-1 text-gray-400" />{booking.scheduleInfo?.shift_start} - {booking.scheduleInfo?.shift_end}</span>
+                    </div>
+                  </div>
+                  <div className="shrink-0 text-right">
+                    <span className={`text-xs uppercase font-bold px-3 py-1.5 rounded-full ${
+                      booking.status === 'completed' ? 'bg-blue-100 text-blue-700' :
+                      booking.status === 'approved' ? 'bg-emerald-100 text-emerald-700' :
+                      'bg-gray-200 text-gray-700'
+                    }`}>
+                      {booking.status}
+                    </span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+};
+
 const AddScheduleModal = ({
   newSchedule, setNewSchedule,
   handleCreateSchedule, setShowAddModal,
@@ -636,6 +707,7 @@ const ScheduleManagement = () => {
   const [filterDate, setFilterDate] = useState('all');
   const [searchStudent, setSearchStudent] = useState('');
   const [viewStudent, setViewStudent] = useState(null);
+  const [selectedDayDetails, setSelectedDayDetails] = useState(null);
 
   const [newSchedule, setNewSchedule] = useState({
     date: '',
@@ -1242,57 +1314,7 @@ const ScheduleManagement = () => {
     <>
       <ToastContainer toasts={toasts} removeToast={removeToast} />
       <div className="space-y-6">
-        {/* Top Tab Switcher */}
-        <div className="flex bg-white p-1.5 rounded-2xl border border-gray-100 shadow-sm w-fit">
-          <button 
-            onClick={() => setActiveTab('schedules')}
-            className={`px-6 py-2.5 rounded-xl text-sm font-bold transition-all flex items-center space-x-2 ${
-              activeTab === 'schedules' 
-                ? 'bg-emerald-600 text-white shadow-lg shadow-emerald-200' 
-                : 'text-gray-400 hover:text-gray-600 hover:bg-gray-50'
-            }`}
-          >
-            <Calendar className="w-4 h-4" />
-            <span>Schedule Review</span>
-          </button>
-          <button 
-            onClick={() => setActiveTab('locations')}
-            className={`px-6 py-2.5 rounded-xl text-sm font-bold transition-all flex items-center space-x-2 ${
-              activeTab === 'locations' 
-                ? 'bg-emerald-600 text-white shadow-lg shadow-emerald-200' 
-                : 'text-gray-400 hover:text-gray-600 hover:bg-gray-50'
-            }`}
-          >
-            <MapPin className="w-4 h-4" />
-            <span>Location Setup</span>
-          </button>
-        </div>
-
-        {activeTab === 'locations' ? (
-          <LocationManagement 
-            locations={hospitalLocations} 
-            onSave={handleSaveHospitalLocations} 
-          />
-        ) : (
-          <>
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-            <button 
-              onClick={() => { setViewMode('calendar'); setShowAddModal(true); }}
-              className="card bg-gradient-to-r from-emerald-600 to-emerald-700 text-white w-full text-left hover:brightness-110 hover:shadow-lg transition-all cursor-pointer group"
-            >
-              <div className="flex items-center justify-between">
-                <div>
-                  <p className="text-emerald-100 text-sm font-medium opacity-80">New Duty</p>
-                  <p className="text-2xl font-bold">Add Schedule</p>
-                </div>
-                <div className="w-12 h-12 bg-white/20 rounded-xl flex items-center justify-center group-hover:scale-110 transition-transform">
-                  <Plus className="w-6 h-6 text-white" />
-                </div>
-              </div>
-            </button>
-          </div>
-
-          <div className="flex justify-between items-center">
+        <div className="flex justify-between items-center">
           <div>
             <h2 className="text-2xl font-bold text-gray-900">Schedule Management</h2>
             <p className="text-gray-600">Create and manage duty schedules for midwifery students</p>
@@ -1420,7 +1442,8 @@ const ScheduleManagement = () => {
                   <div key={weekIndex} className="grid grid-cols-7 border-t border-gray-200">
                     {week.map((day, dayIndex) => (
                       <div key={dayIndex}
-                        className={`min-h-[100px] sm:min-h-[140px] p-1.5 sm:p-2 border-r border-gray-200 last:border-r-0 ${!day.isCurrentMonth ? 'bg-gray-50 text-gray-400' : 'bg-white'} ${day.isToday ? 'bg-blue-50 border-2 border-blue-200' : ''}`}
+                        onClick={() => setSelectedDayDetails({ date: day.date, schedules: day.schedules })}
+                        className={`min-h-[100px] sm:min-h-[140px] p-1.5 sm:p-2 border-r border-gray-200 last:border-r-0 cursor-pointer hover:bg-gray-50 transition-colors ${!day.isCurrentMonth ? 'bg-gray-50 text-gray-400' : 'bg-white'} ${day.isToday ? 'bg-blue-50 border-2 border-blue-200' : ''}`}
                       >
                         <div className="flex justify-between items-start mb-1.5">
                           <span className={`text-xs font-semibold ${day.isToday ? 'text-blue-600' : day.isCurrentMonth ? 'text-gray-900' : 'text-gray-400'}`}>
@@ -1452,7 +1475,7 @@ const ScheduleManagement = () => {
                                         <Trash2 className="w-2.5 h-2.5" />
                                       </button>
                                     </div>
-                                    <div className="truncate italic opacity-90 cursor-pointer hover:font-bold transition-all" onClick={() => handleViewStudent(activeBookings[0]?.profiles)}>
+                                    <div className="truncate italic opacity-90 cursor-pointer hover:font-bold transition-all" onClick={(e) => { e.stopPropagation(); handleViewStudent(activeBookings[0]?.profiles); }}>
                                       {studentNames || <span className="text-gray-400">No students</span>}
                                     </div>
                                   </div>
@@ -1461,7 +1484,8 @@ const ScheduleManagement = () => {
                             })
                           ) : day.isCurrentMonth && !day.isPast && (
                             <button
-                              onClick={() => {
+                              onClick={(e) => {
+                                e.stopPropagation();
                                 const assignedHospital = getHospitalForMonth(day.date);
                                 setNewSchedule({
                                   date: day.date.toISOString().split('T')[0],
@@ -1486,8 +1510,6 @@ const ScheduleManagement = () => {
             </div>
           </div>
         )}
-        </>
-      )}
 
         {showAddModal && (
           <AddScheduleModal
@@ -1525,6 +1547,13 @@ const ScheduleManagement = () => {
           <ViewStudentModal
             student={viewStudent}
             onClose={() => setViewStudent(null)}
+          />
+        )}
+        {selectedDayDetails && (
+          <DayDetailsModal
+            date={selectedDayDetails.date}
+            schedules={selectedDayDetails.schedules}
+            onClose={() => setSelectedDayDetails(null)}
           />
         )}
       </div>

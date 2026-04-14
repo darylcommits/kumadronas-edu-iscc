@@ -3140,8 +3140,10 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
                   />
                 </div>
                 <div>
-                  <h1 className="text-xl font-bold text-gray-900">Kumadronas System</h1>
-                  <p className="text-xs text-gray-600 hidden sm:block">Ilocos Sur Community College</p>
+                  <h1 className="text-xl font-bold text-gray-900 leading-tight">
+                    Kumadronas Clinical On-call Duty System
+                  </h1>
+                  <p className="text-xs text-gray-600 hidden sm:block mt-0.5">Ilocos Sur Community College</p>
                 </div>
               </div>
             </div>
