@@ -466,11 +466,10 @@ const AuthForm = ({ onBackToHome, initialError = '', onErrorShown, initialTab = 
                 <Heart className="w-4 h-4 text-white" />
               </div>
             </div>
-            <h1 className="text-3xl font-bold bg-gradient-to-r from-emerald-600 to-green-600 bg-clip-text text-transparent mb-1">
+            <h1 className="text-2xl font-bold bg-gradient-to-r from-emerald-600 to-green-600 bg-clip-text text-transparent mb-1">
               Kumadronas Clinical On-call <br />Duty System
             </h1>
-            <p className="text-gray-600 font-medium text-sm">Ilocos Sur Community College</p>
-            <p className="text-gray-400 text-xs mt-0.5">On-Call Duty Scheduling System</p>
+            <p className="text-gray-600 font-medium text-sm mt-1">of Ilocos Sur Community College</p>
           </div>
 
           {/* Auth Card */}

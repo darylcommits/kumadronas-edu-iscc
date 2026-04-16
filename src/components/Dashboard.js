@@ -93,6 +93,7 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
   const [showRejectConfirm, setShowRejectConfirm] = useState(false);
   const [scheduleToReject, setScheduleToReject] = useState(null);
   const [studentToReject, setStudentToReject] = useState(null);
+  const [rejectReason, setRejectReason] = useState('');
   const [dailyCancellations, setDailyCancellations] = useState(new Set());
   const [showUserMenu, setShowUserMenu] = useState(false);
   const [showLogoutModal, setShowLogoutModal] = useState(false);
@@ -109,7 +110,8 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
     'rejected', 'rejected_individual', 'rejected_all', 'rejected_schedule',
     'deactivated', 'activated', 'created', 'user_created', 'user_updated',
     'user_activated', 'user_deactivated', 'registration_approved',
-    'registration_declined', 'schedule_created', 'schedule_updated', 'schedule_deleted'
+    'registration_declined', 'schedule_created', 'schedule_updated', 'schedule_deleted',
+    'settings_updated'
   ];
   const [showDutyDetailsModal, setShowDutyDetailsModal] = useState(false);
   const [selectedDuty, setSelectedDuty] = useState(null);
@@ -848,8 +850,8 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
   };
 
   // FIXED: Enhanced handleBookDuty with better notifications for admins
-  const handleBookDuty = async (scheduleId, date) => {
-    setBookingToConfirm({ scheduleId, date });
+  const handleBookDuty = async (scheduleId, date, location) => {
+    setBookingToConfirm({ scheduleId, date, location });
   };
 
   const confirmBookDuty = async () => {
@@ -1040,9 +1042,9 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
       ]);
 
       success('Duty booked successfully! Waiting for admin approval.');
-    } catch (error) {
-      console.error('Error booking duty:', error);
-      error('Error booking duty: ' + error.message);
+    } catch (err) {
+      console.error('Error booking duty:', err);
+      error('Error booking duty: ' + err.message);
     }
   };
 
@@ -1468,7 +1470,7 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
         .update({
           status: 'cancelled',
           cancelled_at: new Date().toISOString(),
-          cancellation_reason: 'Rejected by admin'
+          cancellation_reason: rejectReason.trim() || 'Rejected by admin'
         })
         .eq('id', studentToReject.scheduleStudentId);
 
@@ -1478,7 +1480,7 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
         await supabase.from('notifications').insert({
           user_id: booking.student_id,
           title: 'Duty Booking Rejected',
-          message: `Your duty booking has been rejected by the administrator. Please contact admin for more details.`,
+          message: `Your duty booking has been rejected by the administrator. Reason: ${rejectReason.trim() || 'Please contact admin for more details.'}`,
           type: 'error'
         });
       } catch (err) {
@@ -1491,7 +1493,7 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
         action: 'rejected',
         performed_by: user.id,
         target_user: booking.student_id,
-        notes: `Admin rejected individual student booking for ${studentToReject.studentName}`
+        notes: `Admin rejected individual student booking for ${studentToReject.studentName}. Reason: ${rejectReason.trim()}`
       });
 
       const { data: remainingBookings, error: checkError } = await supabase
@@ -1518,10 +1520,11 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
 
       setShowRejectConfirm(false);
       setStudentToReject(null);
+      setRejectReason('');
       alert(`Booking rejected for ${studentToReject.studentName}.`);
-    } catch (error) {
-      console.error('Error rejecting student:', error);
-      error('Error rejecting student: ' + error.message);
+    } catch (err) {
+      console.error('Error rejecting student:', err);
+      error('Error rejecting student: ' + err.message);
     }
   };
 
@@ -1549,7 +1552,7 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
         .update({
           status: 'cancelled',
           cancelled_at: new Date().toISOString(),
-          cancellation_reason: 'Schedule rejected by admin'
+          cancellation_reason: rejectReason.trim() || 'Schedule rejected by admin'
         })
         .eq('schedule_id', scheduleToReject)
         .eq('status', 'booked');
@@ -1567,7 +1570,7 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
         const notifications = bookings.map(booking => ({
           user_id: booking.student_id,
           title: 'Duty Schedule Rejected',
-          message: `The duty schedule has been rejected by the administrator. Your booking has been cancelled.`,
+          message: `The duty schedule has been rejected by the administrator. Reason: ${rejectReason.trim() || 'Your booking has been cancelled.'}`,
           type: 'error'
         }));
 
@@ -1582,7 +1585,7 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
         schedule_id: scheduleToReject,
         action: 'rejected_all',
         performed_by: user.id,
-        notes: `Admin rejected schedule and cancelled ${bookings?.length || 0} student booking(s)`
+        notes: `Admin rejected schedule and cancelled ${bookings?.length || 0} student booking(s). Reason: ${rejectReason.trim()}`
       });
 
       await Promise.all([
@@ -1594,10 +1597,11 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
 
       setShowRejectConfirm(false);
       setScheduleToReject(null);
+      setRejectReason('');
       alert(`Schedule rejected and all ${bookings?.length || 0} booking(s) cancelled.`);
-    } catch (error) {
-      console.error('Error rejecting schedule:', error);
-      error('Error rejecting schedule: ' + error.message);
+    } catch (err) {
+      console.error('Error rejecting schedule:', err);
+      error('Error rejecting schedule: ' + err.message);
     }
   };
 
@@ -1620,7 +1624,7 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
         .update({
           status: 'cancelled',
           cancelled_at: new Date().toISOString(),
-          cancellation_reason: 'Schedule rejected by admin'
+          cancellation_reason: rejectReason.trim() || 'Schedule rejected by admin'
         })
         .eq('schedule_id', scheduleToReject);
 
@@ -1637,6 +1641,7 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
 
       setShowRejectConfirm(false);
       setScheduleToReject(null);
+      setRejectReason('');
       alert('Schedule rejected and all bookings cancelled.');
     } catch (error) {
       console.error('Error rejecting schedule:', error);
@@ -1663,8 +1668,8 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
         fetchPendingBookings()
       ]);
       alert('Duty cancelled successfully. Note: You cannot book another duty for this date today.');
-    } catch (error) {
-      error('Error cancelling duty: ' + error.message);
+    } catch (err) {
+      error('Error cancelling duty: ' + err.message);
     }
   };
 
@@ -2311,16 +2316,30 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
               <div key={weekIndex} className="grid grid-cols-7 border-t border-gray-200">
                 {week.map((day, dayIndex) => {
                   // FIXED: Role-based capacity calculation and booking logic with PROPER INDIVIDUAL APPROVAL STATUS
-                  const activeStudents = day.schedule?.schedule_students?.filter(ss => ss.status !== 'cancelled') || [];
+                  const allStudents = day.schedule?.schedule_students || [];
+                  const activeStudents = allStudents.filter(ss => ss.status !== 'cancelled');
                   const studentCount = activeStudents.length;
                   const maxStudents = day.schedule?.max_students || 2;
                   const isFull = studentCount >= maxStudents;
-                  const myBooking = activeStudents.find(s => s.student_id === user.id);
-                  const isBooked = !!myBooking;
+                  const myBooking = allStudents.find(s => s.student_id === user.id);
+                  const isBooked = myBooking && myBooking.status !== 'cancelled';
+                  const isCancelled = myBooking?.status === 'cancelled';
                   // FIXED: Check individual booking status - completion implies approval
                   const isApproved = myBooking?.status === 'approved' || myBooking?.status === 'completed';
                   const isCompleted = myBooking?.status === 'completed';
                   const hasSameDayCancellation = user?.role === 'student' && checkSameDayCancellation(day.date.toISOString().split('T')[0]);
+                  
+                  // NEW: Restriction - Hide other available slots for the same hospital if already booked in the month
+                  const hasBookingInMonthForThisHospital = user?.role === 'student' && day.schedule && (studentDuties || []).some(d => {
+                    if (d.status === 'cancelled') return false;
+                    const dDate = new Date(d.schedules.date);
+                    return d.schedules.location === day.schedule.location &&
+                           dDate.getMonth() === day.date.getMonth() &&
+                           dDate.getFullYear() === day.date.getFullYear();
+                  });
+
+                  const isHidden = user?.role === 'student' && hasBookingInMonthForThisHospital && !isBooked;
+
 
                   // FIXED: Role-specific booking logic
                   const canBook = user?.role === 'student' &&
@@ -2344,7 +2363,7 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
                           {day.date.getDate()}
                         </span>
 
-                        {day.schedule && (
+                        {day.schedule && !isHidden && (
                           <div className="flex flex-col items-end space-y-1">
                             {/* ROLE-BASED CAPACITY DISPLAY */}
                             {isAdmin ? (
@@ -2366,33 +2385,41 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
                             ) : user?.role === 'student' ? (
                               // Student view: Booking-focused info with FIXED individual approval status
                               <>
-                                <span className={`px-2 py-1 rounded-full text-xs font-medium ${isCompleted ? 'bg-blue-100 text-blue-800' :
-                                  isBooked ? 'bg-blue-100 text-blue-800' :
-                                    isFull ? 'bg-red-100 text-red-800' :
-                                      'bg-green-100 text-green-800'
-                                  }`}>
-                                  {isCompleted ? 'COMPLETED' : isBooked ? 'BOOKED' : isFull ? 'FULL' : `${maxStudents - studentCount} LEFT`}
-                                </span>
-                                {/* FIXED: Show individual booking approval status, hide if completed (redundant) */}
-                                {isBooked && !isCompleted && (
-                                  <span className={`px-2 py-1 rounded-full text-xs font-medium ${isApproved ? 'bg-green-100 text-green-800' : 'bg-yellow-100 text-yellow-800'
-                                    }`}>
-                                    {isApproved ? 'APPROVED' : 'PENDING'}
+                                {isCancelled ? (
+                                  <span className="px-2 py-1 rounded-full text-xs font-medium bg-red-100 text-red-800">
+                                    REJECTED
                                   </span>
+                                ) : (
+                                  <>
+                                    <span className={`px-2 py-1 rounded-full text-xs font-medium ${isCompleted ? 'bg-blue-100 text-blue-800' :
+                                      isBooked ? 'bg-blue-100 text-blue-800' :
+                                        isFull ? 'bg-red-100 text-red-800' :
+                                          'bg-green-100 text-green-800'
+                                      }`}>
+                                      {isCompleted ? 'COMPLETED' : isBooked ? 'BOOKED' : isFull ? 'FULL' : `${maxStudents - studentCount} LEFT`}
+                                    </span>
+                                    {/* FIXED: Show individual booking approval status, hide if completed (redundant) */}
+                                    {isBooked && !isCompleted && (
+                                      <span className={`px-2 py-1 rounded-full text-xs font-medium ${isApproved ? 'bg-green-100 text-green-800' : 'bg-yellow-100 text-yellow-800'
+                                        }`}>
+                                        {isApproved ? 'APPROVED' : 'PENDING'}
+                                      </span>
+                                    )}
+                                  </>
                                 )}
                               </>
                             ) : (
                               // Parent view: Child-focused info with individual booking status
                               <>
-                                {isBooked ? (
+                                {myBooking ? (
                                   <>
                                     <span className={`px-2 py-1 rounded-full text-xs font-medium ${
                                       isApproved ? 'bg-green-100 text-green-800' :
-                                        myBooking?.status === 'cancelled' ? 'bg-red-100 text-red-800' :
+                                        isCancelled ? 'bg-red-100 text-red-800' :
                                           'bg-yellow-100 text-yellow-800'
                                       }`}>
                                       {isApproved ? 'APPROVED' :
-                                          myBooking?.status === 'cancelled' ? 'CANCELLED' :
+                                          isCancelled ? 'REJECTED' :
                                             'PENDING'}
                                     </span>
                                     <span className="px-2 py-1 rounded-full text-xs font-medium bg-blue-100 text-blue-800 mt-1">
@@ -2410,7 +2437,7 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
                         )}
                       </div>
 
-                      {day.schedule && (
+                      {day.schedule && !isHidden && (
                         <div className="space-y-1">
                           {/* ROLE-BASED STUDENT DISPLAY */}
                           {isAdmin ? (
@@ -2470,7 +2497,7 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
                       )}
 
                       {/* ROLE-BASED ACTION BUTTONS */}
-                      {user?.role === 'student' && (
+                      {user?.role === 'student' && !isHidden && (
                         <>
                           {bookingStatus === 'closed' && day.schedule && !day.isPast && !isBooked && day.isCurrentMonth && (
                             <div className="mt-2 text-xs text-red-600 font-medium text-center bg-red-50 border border-red-100 px-2 py-1 rounded">
@@ -2484,7 +2511,7 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
                               onClick={() => {
                                 const d = day.date;
                                 const localDate = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-                                handleBookDuty(day.schedule.id, localDate);
+                                handleBookDuty(day.schedule.id, localDate, day.schedule.location);
                               }}
                               className="mt-2 w-full text-xs bg-emerald-600 text-white px-2 py-1 rounded hover:bg-emerald-700 transition-colors"
                             >
@@ -2502,7 +2529,7 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
                       )}
 
                       {/* ROLE-BASED STATUS MESSAGES */}
-                      {isFull && day.isCurrentMonth && day.schedule && (
+                      {isFull && !isHidden && day.isCurrentMonth && day.schedule && (
                         <div className={`mt-2 text-xs font-medium text-center ${isAdmin ? 'text-red-600' :
                           user?.role === 'student' ? 'text-red-600' :
                             'text-gray-600'
@@ -2672,10 +2699,16 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
 
                       {duty.status === 'completed' ? 'Completed' :
                         duty.status === 'approved' ? 'Approved' :
-                          duty.status === 'cancelled' ? 'Cancelled' :
+                          duty.status === 'cancelled' ? (duty.cancellation_reason && duty.cancellation_reason.toLowerCase().includes('reject') ? 'Rejected' : 'Cancelled') :
                             'Pending Approval'}
                     </span>
                   </div>
+                  {duty.status === 'cancelled' && duty.cancellation_reason && (
+                    <div className="mt-2 text-red-600 col-span-1 md:col-span-3">
+                      <p className="text-xs font-semibold uppercase tracking-wider">Reason:</p>
+                      <p className="text-sm border-l-2 border-red-300 pl-2 mt-1">{duty.cancellation_reason}</p>
+                    </div>
+                  )}
                 </div>
               </div>
 
@@ -3326,7 +3359,7 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
             <div className="w-14 h-14 bg-emerald-100 rounded-full flex items-center justify-center mx-auto mb-4">
               <Calendar className="w-7 h-7 text-emerald-600" />
             </div>
-            <h3 className="text-lg font-bold text-gray-900 mb-2 uppercase tracking-tight">Are you sure?</h3>
+            <h3 className="text-lg font-bold text-gray-900 mb-2 uppercase tracking-tight">are you sure.</h3>
             <p className="text-sm text-gray-600 mb-2">
               Confirm duty booking for:
             </p>
@@ -3341,7 +3374,7 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
               </p>
             </div>
             <p className="text-xs font-bold text-red-600 bg-red-50 border border-red-100 rounded-lg py-2 px-3 mb-6 animate-pulse uppercase">
-              ⚠️ Confirmed booking cannot be undone
+              ⚠️ confirmed booking cannot be undone
             </p>
             <div className="flex space-x-3">
               <button
@@ -3444,10 +3477,22 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
                 : 'Are you sure you want to reject this entire schedule? All student bookings will be cancelled and students will be notified.'
               }
             </p>
+            <div className="mb-6">
+              <label className="block text-sm font-medium text-gray-700 mb-2">Reason for Rejection <span className="text-red-500">*</span></label>
+              <textarea
+                value={rejectReason}
+                onChange={(e) => setRejectReason(e.target.value)}
+                placeholder="E.g., Missing requirements, Schedule conflict..."
+                className="w-full border border-gray-300 rounded-lg p-3 text-sm focus:ring-red-500 focus:border-red-500 transition-colors"
+                rows="3"
+                required
+              />
+            </div>
             <div className="flex space-x-3">
               <button
                 onClick={studentToReject ? confirmRejectStudent : confirmRejectAllStudents}
-                className="flex-1 bg-red-600 hover:bg-red-700 text-white font-medium py-2 px-4 rounded-lg transition-colors"
+                disabled={!rejectReason.trim()}
+                className="flex-1 bg-red-600 hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed text-white font-medium py-2 px-4 rounded-lg transition-colors"
               >
                 {studentToReject ? 'Reject Student' : 'Reject All'}
               </button>
@@ -3456,6 +3501,7 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
                   setShowRejectConfirm(false);
                   setScheduleToReject(null);
                   setStudentToReject(null);
+                  setRejectReason('');
                 }}
                 className="flex-1 bg-gray-200 hover:bg-gray-300 text-gray-800 font-medium py-2 px-4 rounded-lg transition-colors"
               >

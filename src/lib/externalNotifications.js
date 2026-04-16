@@ -15,9 +15,17 @@ export const sendSmsNotification = async (phoneNumber, message) => {
     return { success: false, error: 'No phone number provided' };
   }
 
-  // Normalize: strip spaces/dashes
-  const cleanNumber = String(phoneNumber).replace(/[\s\-]/g, '');
-  console.log(`[SMS] Sending to: ${cleanNumber}`);
+  // Normalize for PH local format (09xxxxxxxxx)
+  let cleanNumber = String(phoneNumber).replace(/\D/g, ''); 
+  let normalized = cleanNumber;
+  
+  if (cleanNumber.startsWith('63')) {
+    normalized = '0' + cleanNumber.substring(2);
+  } else if (cleanNumber.length === 10 && !cleanNumber.startsWith('0')) {
+    normalized = '0' + cleanNumber;
+  }
+
+  console.log(`[SMS] Sending to: ${normalized} (original: ${phoneNumber})`);
   console.log(`[SMS] Message: ${message}`);
 
   try {
@@ -28,14 +36,18 @@ export const sendSmsNotification = async (phoneNumber, message) => {
         'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
       },
       body: JSON.stringify({
-        phone_number: cleanNumber,
+        phone_number: normalized,
         message: message,
       }),
     });
 
     const result = await response.json();
     console.log('[SMS] API response:', result);
-    return { success: response.ok && result.status === 200, result };
+    
+    // Check for success: HTTP 200 AND potential Iprog-specific status fields
+    const isSuccess = response.ok && (result.success || result.status === 200 || result.code === 200 || result.message === 'success');
+    
+    return { success: isSuccess, result };
   } catch (error) {
     console.warn('[SMS] Notification failed:', error);
     return { success: false, error };

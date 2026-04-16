@@ -243,14 +243,19 @@ export const dbHelpers = {
           // Fetch student name for the external message
           const { data: studentProfile } = await supabase
             .from('profiles')
-            .select('first_name, last_name')
+            .select('first_name, last_name, phone_number')
             .eq('id', studentId)
             .single();
           
           const studentName = studentProfile ? `${studentProfile.first_name} ${studentProfile.last_name}` : 'Your child';
+          const message = `${studentName} has booked duty on Date: ${dateStr} at Location: ${info.location || 'N/A'} (Time: ${info.shift_start || ''} - ${info.shift_end || ''}). Status: Pending Admin Approval.`;
+
+          // Notify student via SMS
+          if (studentProfile?.phone_number) {
+            sendSmsNotification(studentProfile.phone_number, message);
+          }
 
           parents.forEach(parent => {
-            const message = `${studentName} has booked duty for ${dateStr}. Status: Pending Admin Approval.`;
             
             // In-app notification
             notifications.push({
@@ -621,7 +626,7 @@ export const dbHelpers = {
           updated_at: new Date().toISOString()
         })
         .eq('id', bookingId)
-        .select('*, profiles:student_id(*), schedules(date, location)')
+        .select('*, profiles:student_id(*), schedules(date, location, shift_start, shift_end)')
         .single();
 
       if (updateError) throw updateError;
@@ -662,10 +667,16 @@ export const dbHelpers = {
 
         if (parents && parents.length > 0) {
           const parentNotifications = [];
+          const student = booking.profiles;
+          const childName = student ? `${student.first_name} ${student.last_name}` : 'Child';
+          const message = `Hello, your child Name: ${childName} booked duty on Date: ${dateStr} at Location: ${booking.schedules.location} (Time: ${booking.schedules.shift_start} - ${booking.schedules.shift_end}). The admin has approved this schedule.`;
+          
+          // Notify Student via SMS (only once)
+          if (student?.phone_number) {
+            sendSmsNotification(student.phone_number, message);
+          }
+
           parents.forEach(parent => {
-            const student = booking.profiles;
-            const childName = student ? `${student.first_name} ${student.last_name}` : 'Child';
-            const message = `Hello, your child Name: ${childName} booked duty on Date: ${dateStr} and Time: 8:00 AM - 5:00 PM at ${booking.schedules.location}. The admin has approved this schedule.`;
             parentNotifications.push({
               user_id: parent.id,
               title: 'Child Duty Approved',
@@ -707,7 +718,7 @@ export const dbHelpers = {
       // Get all pending bookings for this schedule
       const { data: bookings, error: fetchError } = await supabase
         .from('schedule_students')
-        .select('id, student_id, profiles:student_id(first_name, last_name, middle_initial)')
+        .select('id, student_id, profiles:student_id(first_name, last_name, middle_initial, phone_number)')
         .eq('schedule_id', scheduleId)
         .eq('status', 'booked');
 
@@ -726,7 +737,7 @@ export const dbHelpers = {
         })
         .eq('schedule_id', scheduleId)
         .eq('status', 'booked')
-        .select('*, schedules(date, location)');
+        .select('*, schedules(date, location, shift_start, shift_end)');
 
       if (updateError) throw updateError;
 
@@ -779,7 +790,12 @@ export const dbHelpers = {
               const relatedBooking = bookings.find(b => b.student_id === parent.student_id);
               const student = relatedBooking?.profiles;
               const childName = student ? `${student.first_name} ${student.last_name}` : 'Child';
-              const message = `Hello, your child Name: ${childName} booked duty on Date: ${dateStr} and Time: 8:00 AM - 5:00 PM at ${updated[0].schedules.location}. The admin has approved this schedule.`;
+              const message = `Hello, your child Name: ${childName} booked duty on Date: ${dateStr} at Location: ${updated[0].schedules.location} (Time: ${updated[0].schedules.shift_start} - ${updated[0].schedules.shift_end}). The admin has approved this schedule.`;
+              
+              // Notify Student via SMS
+              if (student?.phone_number) {
+                sendSmsNotification(student.phone_number, message);
+              }
               
               parentNotifications.push({
                 user_id: parent.id,

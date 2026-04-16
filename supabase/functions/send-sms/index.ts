@@ -21,6 +21,8 @@ Deno.serve(async (req: Request) => {
     }
 
     // Call IprogSMS server-side — no CORS restrictions here
+    console.log(`[Edge Function] Attempting to send SMS to: ${phone_number}`);
+    
     const smsResponse = await fetch('https://www.iprogsms.com/api/v1/sms_messages', {
       method: 'POST',
       headers: {
@@ -35,6 +37,8 @@ Deno.serve(async (req: Request) => {
     });
 
     const result = await smsResponse.json();
+    console.log(`[Edge Function] IprogSMS response status: ${smsResponse.status}`);
+    console.log(`[Edge Function] IprogSMS result:`, result);
 
     return new Response(JSON.stringify(result), {
       status: smsResponse.status,

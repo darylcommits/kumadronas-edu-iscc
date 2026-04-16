@@ -461,7 +461,7 @@ const BulkCreateModal = ({ generateBulkSchedules, setShowBulkModal, hospitalLoca
   );
 };
 
-const RejectConfirmModal = ({ rejectTarget, confirmReject, setShowRejectConfirm, setRejectTarget }) => (
+const RejectConfirmModal = ({ rejectTarget, confirmReject, setShowRejectConfirm, setRejectTarget, rejectReason, setRejectReason }) => (
   <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
     <div className="bg-white rounded-lg p-6 w-full max-w-md mx-4">
       <div className="flex items-center space-x-3 mb-4">
@@ -478,15 +478,27 @@ const RejectConfirmModal = ({ rejectTarget, confirmReject, setShowRejectConfirm,
           : 'Are you sure you want to reject this booking? The student will be notified.'
         }
       </p>
+      <div className="mb-6">
+        <label className="block text-sm font-medium text-gray-700 mb-2">Reason for Rejection <span className="text-red-500">*</span></label>
+        <textarea
+          value={rejectReason}
+          onChange={(e) => setRejectReason(e.target.value)}
+          placeholder="E.g., Missing requirements, Schedule conflict..."
+          className="w-full border border-gray-300 rounded-lg p-3 text-sm focus:ring-red-500 focus:border-red-500 transition-colors"
+          rows="3"
+          required
+        />
+      </div>
       <div className="flex space-x-3">
         <button
           onClick={confirmReject}
-          className="flex-1 bg-red-600 hover:bg-red-700 text-white font-medium py-2 px-4 rounded-lg transition-colors"
+          disabled={!rejectReason.trim()}
+          className="flex-1 bg-red-600 hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed text-white font-medium py-2 px-4 rounded-lg transition-colors"
         >
           Reject {rejectTarget?.type === 'all' ? 'All' : 'Booking'}
         </button>
         <button
-          onClick={() => { setShowRejectConfirm(false); setRejectTarget(null); }}
+          onClick={() => { setShowRejectConfirm(false); setRejectTarget(null); setRejectReason(''); }}
           className="flex-1 btn-secondary"
         >
           Cancel
@@ -544,20 +556,28 @@ const LocationManagement = ({ locations, onSave }) => {
 
   const handleDelete = (idx) => {
     if (window.confirm('Are you sure you want to remove this location?')) {
+      const deletedName = localLocations[idx].name;
       const updated = localLocations.filter((_, i) => i !== idx);
-      onSave(updated);
+      onSave(updated, null, { type: 'delete', name: deletedName });
     }
   };
 
   const handleSaveEdit = (idx) => {
-    onSave(localLocations);
+    const oldName = locations[idx]?.name;
+    const newName = localLocations[idx]?.name;
+    let renameEvent = null;
+    if (oldName && newName && oldName !== newName) {
+      renameEvent = { oldName, newName };
+    }
+    onSave(localLocations, renameEvent);
     setEditingIdx(null);
   };
 
   const handleAddNew = () => {
     if (!newLoc.name || !newLoc.description) return;
+    const addedName = newLoc.name;
     const updated = [...localLocations, newLoc];
-    onSave(updated);
+    onSave(updated, null, { type: 'add', name: addedName });
     setNewLoc({ name: '', capacity: 4, description: '' });
     setIsAdding(false);
   };
@@ -693,6 +713,7 @@ const ScheduleManagement = () => {
   const [schedules, setSchedules] = useState([]);
   const [currentDate, setCurrentDate] = useState(new Date());
   const [viewMode, setViewMode] = useState('calendar');
+  const [bookingStatus, setBookingStatus] = useState('open');
   const [activeTab, setActiveTab] = useState('schedules'); // 'schedules' | 'locations'
   const [selectedHospital, setSelectedHospital] = useState('');
   const [showAddModal, setShowAddModal] = useState(false);
@@ -700,6 +721,7 @@ const ScheduleManagement = () => {
   const [scheduleToDelete, setScheduleToDelete] = useState(null);
   const [showRejectConfirm, setShowRejectConfirm] = useState(false);
   const [rejectTarget, setRejectTarget] = useState(null);
+  const [rejectReason, setRejectReason] = useState('');
   const [showBulkModal, setShowBulkModal] = useState(false);
   const [pendingBookings, setPendingBookings] = useState([]);
 
@@ -732,6 +754,7 @@ const ScheduleManagement = () => {
     fetchSchedules();
     fetchPendingBookings();
     fetchHospitalLocations();
+    fetchBookingStatus();
 
     const settingsChannel = supabase
       .channel('system_settings_changes')
@@ -768,21 +791,81 @@ const ScheduleManagement = () => {
     }
   };
 
-  const handleSaveHospitalLocations = async (updatedLocations) => {
+  const fetchBookingStatus = async () => {
     try {
-      const { error: updateError } = await dbHelpers.updateHospitalLocations(updatedLocations);
-      if (updateError) throw updateError;
+      const { data, error } = await supabase.from('system_settings').select('value').eq('key', 'booking_system_status').single();
+      if (!error && data) {
+        setBookingStatus(data.value);
+      }
+    } catch (err) {
+      console.error('Error fetching booking status:', err);
+    }
+  };
+
+  const toggleBookingStatus = async () => {
+    const newStatus = bookingStatus === 'open' ? 'closed' : 'open';
+    try {
+      const { error } = await supabase.from('system_settings').update({ value: newStatus }).eq('key', 'booking_system_status');
+      if (error) throw error;
+      setBookingStatus(newStatus);
+      success(`Scheduling system is now ${newStatus.toUpperCase()}`);
       
-      setHospitalLocations(updatedLocations);
-      success('Hospital locations updated successfully');
-      
-      // Log the update
       try {
         const currentUser = (await supabase.auth.getUser()).data.user;
         await supabase.from('duty_logs').insert({
           action: 'settings_updated',
           performed_by: currentUser?.id,
-          notes: `Admin updated hospital locations list (${updatedLocations.length} locations)`
+          notes: `Admin ${newStatus === 'open' ? 'opened' : 'closed'} the student scheduling system`
+        });
+      } catch (logErr) {}
+    } catch (err) {
+      console.error('Error toggling booking status:', err);
+      error('Failed to change booking status');
+    }
+  };
+
+  const handleSaveHospitalLocations = async (updatedLocations, renameEvent = null, actionEvent = null) => {
+    try {
+      const { error: updateError } = await dbHelpers.updateHospitalLocations(updatedLocations);
+      if (updateError) throw updateError;
+      
+      setHospitalLocations(updatedLocations);
+      
+      if (renameEvent) {
+        const { error: renameError } = await supabase
+          .from('schedules')
+          .update({ location: renameEvent.newName })
+          .eq('location', renameEvent.oldName);
+          
+        if (renameError) {
+          console.error("Failed to rename schedules:", renameError);
+        } else {
+          if (selectedHospital === renameEvent.oldName) setSelectedHospital(renameEvent.newName);
+          if (filterLocation === renameEvent.oldName) setFilterLocation(renameEvent.newName);
+          await Promise.all([fetchSchedules(), fetchPendingBookings()]);
+        }
+        success(`Hospital renamed successfully and schedules moved to ${renameEvent.newName}`);
+      } else if (actionEvent) {
+        success(`Hospital location ${actionEvent.type === 'add' ? 'added' : 'deleted'} successfully`);
+      } else {
+        success('Hospital locations updated successfully');
+      }
+      
+      // Log the update
+      try {
+        const currentUser = (await supabase.auth.getUser()).data.user;
+        let logNotes = `Admin updated hospital locations list (${updatedLocations.length} locations)`;
+        
+        if (renameEvent) {
+            logNotes = `Admin renamed hospital from '${renameEvent.oldName}' to '${renameEvent.newName}'`;
+        } else if (actionEvent) {
+            logNotes = `Admin ${actionEvent.type === 'add' ? 'added new hospital location:' : 'removed hospital location:'} '${actionEvent.name}'`;
+        }
+        
+        await supabase.from('duty_logs').insert({
+          action: 'settings_updated',
+          performed_by: currentUser?.id,
+          notes: logNotes
         });
       } catch (logErr) {}
     } catch (err) {
@@ -886,28 +969,58 @@ const ScheduleManagement = () => {
       const currentUser = (await supabase.auth.getUser()).data.user;
       if (rejectTarget.type === 'single') {
         const { error: rejectError } = await supabase.from('schedule_students').update({
-          status: 'cancelled', cancelled_at: new Date().toISOString(), cancellation_reason: 'Booking rejected by admin'
+          status: 'cancelled', cancelled_at: new Date().toISOString(), cancellation_reason: rejectReason.trim() || 'Booking rejected by admin'
         }).eq('id', rejectTarget.bookingId);
         if (rejectError) throw rejectError;
+
+        // Notify student explicitly referencing reason
+        const { data: bData } = await supabase.from('schedule_students').select('student_id').eq('id', rejectTarget.bookingId).single();
+        if (bData?.student_id) {
+          await supabase.from('notifications').insert([{
+            user_id: bData.student_id,
+            title: 'Duty Booking Rejected',
+            message: `Your duty booking has been rejected by the administrator. Reason: ${rejectReason.trim()}`,
+            type: 'error'
+          }]);
+        }
+
         await supabase.from('duty_logs').insert([{
           schedule_student_id: rejectTarget.bookingId, action: 'rejected_individual',
-          performed_by: currentUser?.id, notes: 'Admin rejected individual student booking'
+          performed_by: currentUser?.id, notes: `Admin rejected individual student booking. Reason: ${rejectReason.trim()}`
         }]);
         success('Booking rejected successfully');
       } else {
+        // Fetch to notify students before cancellation deletes references
+        const { data: bookingsArray } = await supabase.from('schedule_students')
+          .select('student_id')
+          .eq('schedule_id', rejectTarget.scheduleId)
+          .eq('status', 'booked');
+
         const { error: rejectError } = await supabase.from('schedule_students').update({
-          status: 'cancelled', cancelled_at: new Date().toISOString(), cancellation_reason: 'All bookings rejected by admin'
+          status: 'cancelled', cancelled_at: new Date().toISOString(), cancellation_reason: rejectReason.trim() || 'All bookings rejected by admin'
         }).eq('schedule_id', rejectTarget.scheduleId).eq('status', 'booked');
         if (rejectError) throw rejectError;
+
+        if (bookingsArray && bookingsArray.length > 0) {
+          const notifications = bookingsArray.map(b => ({
+            user_id: b.student_id,
+            title: 'Duty Schedule Rejected',
+            message: `The duty schedule has been rejected by the administrator. Reason: ${rejectReason.trim()}`,
+            type: 'error'
+          }));
+          await supabase.from('notifications').insert(notifications);
+        }
+
         await supabase.from('duty_logs').insert([{
           schedule_id: rejectTarget.scheduleId, action: 'rejected_all',
-          performed_by: currentUser?.id, notes: 'Admin rejected all bookings for schedule'
+          performed_by: currentUser?.id, notes: `Admin rejected all bookings for schedule. Reason: ${rejectReason.trim()}`
         }]);
         success('All bookings rejected for this schedule');
       }
       await Promise.all([fetchSchedules(), fetchPendingBookings()]);
       setShowRejectConfirm(false);
       setRejectTarget(null);
+      setRejectReason('');
     } catch (err) {
       console.error('Error rejecting booking(s):', err);
       error('Failed to reject booking(s)');
@@ -1319,7 +1432,18 @@ const ScheduleManagement = () => {
             <h2 className="text-2xl font-bold text-gray-900">Schedule Management</h2>
             <p className="text-gray-600">Create and manage duty schedules for midwifery students</p>
           </div>
-          <div className="flex space-x-2">
+          <div className="flex items-center space-x-4">
+            <div className="flex items-center space-x-2 mr-2 pr-4 border-r border-gray-200">
+              <span className={`text-sm font-bold ${bookingStatus === 'open' ? 'text-emerald-600' : 'text-red-600'}`}>
+                System {bookingStatus.toUpperCase()}
+              </span>
+              <button 
+                onClick={toggleBookingStatus}
+                className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none ${bookingStatus === 'open' ? 'bg-emerald-500' : 'bg-gray-300'}`}
+              >
+                <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${bookingStatus === 'open' ? 'translate-x-6' : 'translate-x-1'}`} />
+              </button>
+            </div>
             <button onClick={() => setShowBulkModal(true)} className="btn-secondary flex items-center space-x-2">
               <Calendar className="w-4 h-4" /><span>Bulk Create</span>
             </button>
@@ -1351,25 +1475,48 @@ const ScheduleManagement = () => {
                 <Calendar className="w-4 h-4" /><span>Calendar View</span>
               </div>
             </button>
+            <button
+              onClick={() => setViewMode('locations')}
+              className={`flex-1 py-2 px-4 rounded-md font-medium transition-all ${viewMode === 'locations' ? 'bg-white text-blue-600 shadow-md' : 'text-gray-600 hover:text-gray-700'}`}
+            >
+              <div className="flex items-center justify-center space-x-2">
+                <MapPin className="w-4 h-4" /><span>Location Config</span>
+              </div>
+            </button>
           </div>
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
           <button onClick={() => setViewMode('calendar')} className="card bg-gradient-to-r from-blue-500 to-blue-600 text-white w-full text-left hover:brightness-110 hover:shadow-lg transition-all cursor-pointer">
             <div className="flex items-center justify-between">
-              <div><p className="text-blue-100">Total Schedules</p><p className="text-2xl font-bold">{schedules.length}</p></div>
+              <div>
+                <p className="text-blue-100">Total Schedules</p>
+                <p className="text-2xl font-bold">
+                  {schedules.filter(s => (viewMode === 'calendar' ? selectedHospital : filterLocation) === 'all' || !(viewMode === 'calendar' ? selectedHospital : filterLocation) ? true : s.location === (viewMode === 'calendar' ? selectedHospital : filterLocation)).length}
+                </p>
+              </div>
               <Calendar className="w-8 h-8 text-blue-200" />
             </div>
           </button>
           <button onClick={() => setViewMode('pending')} className="card bg-gradient-to-r from-yellow-500 to-yellow-600 text-white w-full text-left hover:brightness-110 hover:shadow-lg transition-all cursor-pointer">
             <div className="flex items-center justify-between">
-              <div><p className="text-yellow-100">Pending Bookings</p><p className="text-2xl font-bold">{pendingBookings.length}</p></div>
+              <div>
+                <p className="text-yellow-100">Pending Bookings</p>
+                <p className="text-2xl font-bold">
+                  {pendingBookings.filter(b => (viewMode === 'calendar' ? selectedHospital : filterLocation) === 'all' || !(viewMode === 'calendar' ? selectedHospital : filterLocation) ? true : b.schedules?.location === (viewMode === 'calendar' ? selectedHospital : filterLocation)).length}
+                </p>
+              </div>
               <Clock className="w-8 h-8 text-yellow-200" />
             </div>
           </button>
           <button onClick={() => { setViewMode('calendar'); setFilterLocation('all'); setFilterDate('all'); }} className="card bg-gradient-to-r from-green-500 to-green-600 text-white w-full text-left hover:brightness-110 hover:shadow-lg transition-all cursor-pointer">
             <div className="flex items-center justify-between">
-              <div><p className="text-green-100">Approved</p><p className="text-2xl font-bold">{schedules.filter(s => s.status === 'approved').length}</p></div>
+              <div>
+                <p className="text-green-100">Approved</p>
+                <p className="text-2xl font-bold">
+                  {schedules.filter(s => s.status === 'approved' && ((viewMode === 'calendar' ? selectedHospital : filterLocation) === 'all' || !(viewMode === 'calendar' ? selectedHospital : filterLocation) ? true : s.location === (viewMode === 'calendar' ? selectedHospital : filterLocation))).length}
+                </p>
+              </div>
               <Check className="w-8 h-8 text-green-200" />
             </div>
           </button>
@@ -1379,6 +1526,9 @@ const ScheduleManagement = () => {
                 <p className="text-emerald-100">This Month</p>
                 <p className="text-2xl font-bold">
                   {schedules.filter(s => {
+                    const activeLoc = viewMode === 'calendar' ? selectedHospital : filterLocation;
+                    const locationMatch = activeLoc === 'all' || !activeLoc ? true : s.location === activeLoc;
+                    if (!locationMatch) return false;
                     const d = new Date(s.date + 'T00:00:00'); const now = new Date();
                     return d.getMonth() === now.getMonth() && d.getFullYear() === now.getFullYear();
                   }).length}
@@ -1389,7 +1539,14 @@ const ScheduleManagement = () => {
           </button>
         </div>
 
-        {viewMode === 'pending' ? renderPendingApprovalsView() : (
+        {viewMode === 'locations' ? (
+          <div className="card">
+            <LocationManagement 
+              locations={hospitalLocations} 
+              onSave={handleSaveHospitalLocations} 
+            />
+          </div>
+        ) : viewMode === 'pending' ? renderPendingApprovalsView() : (
           <div className="card">
             <div className="flex items-center justify-between mb-4 p-4 bg-gray-50 rounded-lg">
               <div className="flex items-center space-x-4">
@@ -1541,6 +1698,8 @@ const ScheduleManagement = () => {
             confirmReject={confirmReject}
             setShowRejectConfirm={setShowRejectConfirm}
             setRejectTarget={setRejectTarget}
+            rejectReason={rejectReason}
+            setRejectReason={setRejectReason}
           />
         )}
         {viewStudent && (

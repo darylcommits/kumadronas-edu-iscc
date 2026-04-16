@@ -22,14 +22,11 @@ const LandingPage = ({ onGetStarted }) => {
       <div className="relative z-10 flex flex-col items-center text-center px-6">
 
         {/* Title */}
-        <h1 className="landing-title text-6xl md:text-8xl font-extrabold text-white mb-3 tracking-tight">
+        <h1 className="landing-title text-4xl md:text-6xl font-extrabold text-white mb-3 tracking-tight">
           Kumadronas Clinical On-call <br />Duty System
         </h1>
-        <p className="landing-subtitle text-white/90 text-2xl md:text-3xl font-semibold mb-2">
-          Ilocos Sur Community College
-        </p>
-        <p className="landing-tagline text-white/70 text-lg md:text-xl mb-10">
-          On-Call Duty Scheduling System
+        <p className="landing-subtitle text-white/90 text-xl md:text-2xl font-semibold mb-10">
+          of Ilocos Sur Community College
         </p>
 
         {/* Buttons */}

@@ -122,8 +122,9 @@ const UserManagement = () => {
         acc.total++;
         if (u.role) acc[u.role] = (acc[u.role] || 0) + 1;
         if (u.is_active) acc.active++;
+        else acc.inactive++;
         return acc;
-      }, { total: 0, admin: 0, 'co-admin': 0, student: 0, parent: 0, active: 0 });
+      }, { total: 0, admin: 0, 'co-admin': 0, student: 0, parent: 0, active: 0, inactive: 0 });
       setStats(s);
     } catch (err) {
       console.error('Error fetching users:', err);
@@ -390,7 +391,11 @@ const UserManagement = () => {
       }
 
       setUsers(prev => prev.map(u => u.id === user.id ? { ...u, is_active: !u.is_active } : u));
-      setStats(prev => ({ ...prev, active: user.is_active ? prev.active - 1 : prev.active + 1 }));
+      setStats(prev => ({ 
+        ...prev, 
+        active: user.is_active ? prev.active - 1 : prev.active + 1,
+        inactive: user.is_active ? prev.inactive + 1 : prev.inactive - 1
+      }));
     } catch (err) {
       console.error('Error toggling status:', err);
     } finally {
@@ -703,6 +708,7 @@ const UserManagement = () => {
     { label: 'Students',     value: stats.student,           color: 'from-emerald-500 to-green-600', icon: GraduationCap },
     { label: 'Parents',      value: stats.parent || 0,       color: 'from-amber-500 to-amber-600',   icon: Users },
     { label: 'Active',       value: stats.active,            color: 'from-green-500 to-emerald-600', icon: CheckCircle },
+    { label: 'Inactive',     value: stats.inactive,          color: 'from-red-500 to-rose-600',      icon: XCircle },
   ];
 
   // Pagination helpers
@@ -737,7 +743,7 @@ const UserManagement = () => {
       </div>
 
       {/* Stat Cards */}
-      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-4">
+      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
         {statCards.map(({ label, value, color, icon: Icon }) => (
           <div key={label} className={`bg-gradient-to-br ${color} rounded-2xl p-4 text-white shadow-md`}>
             <div className="flex items-center justify-between mb-2">
