@@ -2454,17 +2454,19 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
                             ))
                           ) : user?.role === 'student' ? (
                             // Student: Show their own booking prominently, others less prominent
-                            activeStudents.map((assignment, idx) => (
-                              <div
-                                key={idx}
-                                className={`text-xs px-2 py-1 rounded truncate ${assignment.student_id === user.id
-                                  ? 'bg-blue-100 text-blue-800 font-medium border border-blue-200'
-                                  : 'bg-gray-50 text-gray-600'
-                                  }`}
-                              >
-                                {assignment.student_id === user.id ? 'YOU' : assignment.profiles?.first_name || 'Student'}
-                              </div>
-                            ))
+                            activeStudents
+                              .filter(assignment => !(assignment.student_id === user.id && isApproved))
+                              .map((assignment, idx) => (
+                                <div
+                                  key={idx}
+                                  className={`text-xs px-2 py-1 rounded truncate ${assignment.student_id === user.id
+                                    ? 'bg-blue-100 text-blue-800 font-medium border border-blue-200'
+                                    : 'bg-gray-50 text-gray-600'
+                                    }`}
+                                >
+                                  {assignment.student_id === user.id ? 'YOU' : assignment.profiles?.first_name || 'Student'}
+                                </div>
+                              ))
                           ) : (
                             // Parent: Only show if their child is assigned
                             activeStudents
