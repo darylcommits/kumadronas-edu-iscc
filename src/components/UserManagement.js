@@ -1430,8 +1430,9 @@ const UserManagement = () => {
       {/* ── VIEW USER MODAL ── */}
       {viewUser && (
         <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center p-4" onClick={() => setViewUser(null)}>
-          <div className="bg-white rounded-3xl shadow-2xl w-full max-w-md overflow-hidden" onClick={e => e.stopPropagation()}>
-            <div className="bg-gradient-to-r from-emerald-600 to-green-600 p-6 text-white">
+          <div className="bg-white rounded-3xl shadow-2xl w-full max-w-md flex flex-col max-h-[90vh] overflow-hidden" onClick={e => e.stopPropagation()}>
+            {/* Header */}
+            <div className="bg-gradient-to-r from-emerald-600 to-green-600 p-6 text-white shrink-0">
               <div className="flex items-center space-x-4">
                 <div className="w-16 h-16 rounded-full bg-white/20 flex items-center justify-center text-2xl font-bold shadow-lg overflow-hidden">
                   {viewUser.avatar_url
@@ -1444,7 +1445,9 @@ const UserManagement = () => {
                 </div>
               </div>
             </div>
-            <div className="p-6 space-y-4">
+
+            {/* Scrollable Body Content */}
+            <div className="flex-1 overflow-y-auto p-6 space-y-4 custom-scrollbar">
               <div className="flex items-center justify-between">
                 <RoleBadge role={viewUser.role} />
                 <StatusBadge isActive={viewUser.is_active} />
@@ -1465,7 +1468,9 @@ const UserManagement = () => {
                 ))}
               </div>
             </div>
-            <div className="px-6 pb-6 flex space-x-3">
+
+            {/* Fixed Footer Actions */}
+            <div className="px-6 pb-6 pt-2 flex space-x-3 shrink-0">
               <button onClick={() => { openEditModal(viewUser); setViewUser(null); }}
                 className="flex-1 py-2.5 rounded-xl bg-blue-50 text-blue-600 hover:bg-blue-100 font-semibold text-sm transition-colors flex items-center justify-center space-x-1">
                 <Pencil className="w-4 h-4" /><span>Edit</span>
@@ -1508,7 +1513,7 @@ const UserManagement = () => {
       {/* Decline Modal */}
       {declineModal && (
         <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-3xl shadow-2xl w-full max-w-md p-6">
+          <div className="bg-white rounded-3xl shadow-2xl w-full max-w-md p-6 max-h-[90vh] overflow-y-auto custom-scrollbar">
             <div className="flex items-center space-x-3 mb-4">
               <div className="w-10 h-10 bg-red-100 rounded-full flex items-center justify-center">
                 <XCircle className="w-5 h-5 text-red-600" />
@@ -1546,9 +1551,9 @@ const UserManagement = () => {
       {/* ── PENDING DETAIL MODAL ── */}
       {viewPending && (
         <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4" onClick={() => setViewPending(null)}>
-          <div className="bg-white rounded-3xl shadow-2xl w-full max-w-md overflow-hidden" onClick={e => e.stopPropagation()}>
+          <div className="bg-white rounded-3xl shadow-2xl w-full max-w-md flex flex-col max-h-[90vh] overflow-hidden" onClick={e => e.stopPropagation()}>
             {/* Header */}
-            <div className="bg-gradient-to-r from-amber-500 to-amber-600 px-6 py-5 flex items-center justify-between">
+            <div className="bg-gradient-to-r from-amber-500 to-amber-600 px-6 py-5 flex items-center justify-between shrink-0">
               <div className="flex items-center space-x-3">
                 <div className="w-11 h-11 rounded-full bg-white/20 flex items-center justify-center">
                   <span className="text-white font-bold text-sm">
@@ -1564,8 +1569,9 @@ const UserManagement = () => {
                 <X className="w-5 h-5" />
               </button>
             </div>
-            {/* Details */}
-            <div className="p-6 space-y-3">
+
+            {/* Scrollable Body Content */}
+            <div className="flex-1 overflow-y-auto p-6 space-y-3 custom-scrollbar">
               {[
                 { icon: Mail,          label: 'Email',          value: viewPending.email },
                 { icon: User,          label: 'Role',           value: viewPending.role ? viewPending.role.charAt(0).toUpperCase() + viewPending.role.slice(1) : '—' },
@@ -1610,8 +1616,9 @@ const UserManagement = () => {
                 </div>
               )}
             </div>
-            {/* Actions */}
-            <div className="px-6 pb-6 flex space-x-3">
+
+            {/* Fixed Footer Actions */}
+            <div className="px-6 pb-6 pt-3 flex space-x-3 bg-white border-t border-gray-50 shrink-0">
               <button
                 onClick={() => { setConfirmApprove(viewPending); setViewPending(null); }}
                 disabled={approveLoading === viewPending.id}
@@ -1632,7 +1639,8 @@ const UserManagement = () => {
       {/* ── APPROVE CONFIRMATION MODAL ── */}
       {confirmApprove && (
         <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-3xl shadow-2xl w-full max-w-sm overflow-hidden">
+          <div className="bg-white rounded-3xl shadow-2xl w-full max-w-sm overflow-hidden max-h-[90vh] flex flex-col">
+            <div className="overflow-y-auto custom-scrollbar">
             <div className="bg-gradient-to-r from-emerald-500 to-emerald-600 px-6 py-5 text-center">
               <div className="w-14 h-14 bg-white/20 rounded-full flex items-center justify-center mx-auto mb-3">
                 <CheckCircle className="w-7 h-7 text-white" />
@@ -1661,6 +1669,7 @@ const UserManagement = () => {
                     : <span>Yes, Approve</span>}
                 </button>
               </div>
+            </div>
             </div>
           </div>
         </div>

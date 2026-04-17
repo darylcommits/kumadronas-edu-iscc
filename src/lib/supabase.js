@@ -140,22 +140,40 @@ export const dbHelpers = {
         throw new Error(`This date is fully booked (${info.current_bookings}/${info.max_students} students)`);
       }
 
-      // Check if student already has a booking for this schedule
+      // Check for any existing duty on this same date
+      const { data: existingDateBooking, error: dateError } = await supabase
+        .from('schedule_students')
+        .select(`
+          id,
+          schedules!inner(date)
+        `)
+        .eq('student_id', studentId)
+        .neq('status', 'cancelled')
+        .eq('schedules.date', info.schedule_date.split('T')[0])
+        .maybeSingle();
+
+      if (dateError && dateError.code !== 'PGRST116') {
+        console.error('Error checking same date bookings:', dateError);
+      } else if (existingDateBooking) {
+        throw new Error('You already have a duty scheduled for this date. Students can only have one duty per day.');
+      }
+
+      // Check if student already has a booking for this specific schedule (protection against double clicks)
       const { data: existingBooking, error: existingError } = await supabase
         .from('schedule_students')
         .select('id')
         .eq('schedule_id', scheduleId)
         .eq('student_id', studentId)
-        .eq('status', 'booked')
+        .neq('status', 'cancelled')
         .maybeSingle();
 
       if (existingError) {
         console.error('Error checking existing booking:', existingError);
-        throw new Error('Failed to check existing bookings');
+        throw new Error('Failed to verify existing bookings');
       }
 
       if (existingBooking) {
-        throw new Error('You have already booked this date');
+        throw new Error('You have already booked this specific duty');
       }
 
       // Proceed with booking - the database trigger will do final validation

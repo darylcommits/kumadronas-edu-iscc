@@ -888,7 +888,7 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
           schedules!inner(date)
         `)
         .eq('student_id', user.id)
-        .eq('status', 'booked')
+        .neq('status', 'cancelled')
         .eq('schedules.date', date)
         .maybeSingle();
 
@@ -899,7 +899,7 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
       }
 
       if (existingDateBooking) {
-        warning('You already have a duty scheduled for this date at another hospital. Students can only have one duty per day.');
+        warning('You already have a duty scheduled for this date. Students can only have one duty per day.');
         return;
       }
 
@@ -1852,6 +1852,7 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
     ] : []),
     { id: 'notifications', label: 'Notifications', icon: Bell },
     { id: 'profile', label: 'Profile Settings', icon: Settings },
+    { id: 'signout', label: 'Sign Out', icon: LogOut },
   ];
 
   // Dashboard Overview Component
@@ -3193,14 +3194,24 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
 
             {/* Right side - Simplified Header Actions */}
             <div className="flex items-center space-x-2">
-              <button
-                onClick={handleSignOut}
-                className="p-2 text-gray-400 hover:text-gray-600 rounded-lg hover:bg-gray-50 transition-colors flex items-center space-x-2 group"
-                title="Sign Out"
-              >
-                <LogOut className="w-5 h-5 group-hover:scale-110 transition-transform" />
-                <span className="text-sm font-medium hidden sm:inline text-gray-600 group-hover:text-gray-900">Sign Out</span>
-              </button>
+              <div className="hidden sm:flex items-center p-2 px-3 bg-emerald-50/50 border border-emerald-100 rounded-2xl mr-2">
+                <div className="flex items-center space-x-3">
+                  <div className="w-10 h-10 rounded-full overflow-hidden flex items-center justify-center bg-white border border-emerald-200 flex-shrink-0">
+                    <img
+                      src="/image0.png"
+                      alt="User Avatar"
+                      className="w-full h-full object-contain"
+                    />
+                  </div>
+                  <div className="min-w-0">
+                    <p className="text-sm font-bold text-gray-900 truncate leading-tight">{user?.first_name} {user?.last_name}</p>
+                    <p className="text-[10px] text-emerald-600 font-semibold capitalize leading-tight mt-0.5">{user?.role}</p>
+                    {user?.email && (
+                      <p className="text-[10px] text-gray-500 truncate leading-tight">{user.email}</p>
+                    )}
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
         </div>
@@ -3256,12 +3267,17 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
                     <button
                       key={item.id}
                       onClick={() => {
-                        setActiveTab(item.id);
+                        if (item.id === 'signout') {
+                          handleSignOut();
+                        } else {
+                          setActiveTab(item.id);
+                        }
                         setSidebarOpen(false);
                       }}
-                      className={`w-full flex items-center justify-between px-4 py-3 rounded-lg text-left transition-all duration-200 ${activeTab === item.id
-                        ? 'bg-gradient-to-r from-emerald-600 to-emerald-700 text-white shadow-lg transform scale-105'
-                        : 'text-slate-700 hover:bg-slate-100 hover:text-slate-900'
+                      className={`w-full flex items-center justify-between px-4 py-3 rounded-lg text-left transition-all duration-200 ${
+                        activeTab === item.id || (item.id === 'signout' && showLogoutModal)
+                          ? 'bg-gradient-to-r from-emerald-600 to-emerald-700 text-white shadow-lg transform scale-105'
+                          : 'text-slate-700 hover:bg-slate-100 hover:text-slate-900'
                         }`}
                     >
                       <div className="flex items-center space-x-3">
@@ -3278,25 +3294,7 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
                 })}
               </nav>
 
-              {/* User Info Card in Sidebar */}
-              <div className="mt-8 p-4 bg-gradient-to-r from-emerald-50 to-slate-50 rounded-lg border border-emerald-200">
-                <div className="flex items-center space-x-3">
-                  <div className="w-12 h-12 rounded-full overflow-hidden flex items-center justify-center bg-white border-2 border-emerald-200 flex-shrink-0">
-                    <img
-                      src="/image0.png"
-                      alt="Comadronas System Logo"
-                      className="w-full h-full object-contain"
-                    />
-                  </div>
-                  <div className="min-w-0 flex-1">
-                    <p className="font-medium text-gray-900 truncate">{user?.first_name} {user?.last_name}</p>
-                    <p className="text-sm text-gray-600 capitalize">{user?.role}</p>
-                    {user?.email && (
-                      <p className="text-xs text-gray-500 truncate">{user.email}</p>
-                    )}
-                  </div>
-                </div>
-              </div>
+              {/* User Info Card removed from here, moved to Header */}
 
               {/* Mobile Sign Out Button */}
               <button
