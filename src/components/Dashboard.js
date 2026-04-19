@@ -72,6 +72,7 @@ ChartJS.register(
 
 const Dashboard = ({ user, session, onProfileUpdate }) => {
   const [activeTab, setActiveTab] = useState('dashboard');
+  const [mgmtViewMode, setMgmtViewMode] = useState('calendar');
   const [schedules, setSchedules] = useState([]);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [notifications, setNotifications] = useState([]);
@@ -1194,8 +1195,7 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
         .from('schedule_students')
         .update({
           status: 'approved',
-          approved_at: new Date().toISOString(),
-          approved_by: user.id
+          updated_at: new Date().toISOString()
         })
         .eq('id', scheduleStudentId);
 
@@ -1345,7 +1345,22 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
         throw scheduleError;
       }
 
-      console.log('Schedule status updated successfully');
+      console.log('Updating all students for this schedule to approved status...');
+      const { error: allBookingsUpdateError } = await supabase
+        .from('schedule_students')
+        .update({
+          status: 'approved',
+          updated_at: new Date().toISOString()
+        })
+        .eq('schedule_id', scheduleId)
+        .eq('status', 'booked');
+
+      if (allBookingsUpdateError) {
+        console.error('Error updating students status:', allBookingsUpdateError);
+        throw allBookingsUpdateError;
+      }
+
+      console.log('Schedule and all student bookings updated successfully');
 
       const { data: bookings, error: bookingsError } = await supabase
         .from('schedule_students')
@@ -1881,7 +1896,13 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
                 </div>
               </div>
             </button>
-            <button onClick={() => setActiveTab('pending')} className="card bg-gradient-to-r from-emerald-600 to-emerald-700 text-white h-24 w-full text-left hover:brightness-110 hover:shadow-lg transition-all cursor-pointer">
+            <button 
+              onClick={() => {
+                setActiveTab('schedule-management');
+                setMgmtViewMode('pending');
+              }} 
+              className="card bg-gradient-to-r from-emerald-600 to-emerald-700 text-white h-24 w-full text-left hover:brightness-110 hover:shadow-lg transition-all cursor-pointer"
+            >
               <div className="flex items-center justify-between h-full px-4">
                 <div className="flex-1">
                   <p className="text-emerald-200 text-xs font-medium uppercase tracking-wide">Pending Approvals</p>
@@ -2076,138 +2097,7 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
     </div>
   );
 
-  // Pending Approvals View
-  const renderPendingApprovalsView = () => (
-    <div className="space-y-6">
-      <div className="flex justify-between items-center">
-        <div>
-          <h3 className="text-2xl font-bold text-gray-900">Pending Schedule Approvals</h3>
-          <p className="text-gray-600">Review and approve duty schedules - You can approve students individually or all at once</p>
-        </div>
-        <div className="bg-yellow-100 text-yellow-800 px-3 py-1 rounded-full text-sm font-medium">
-          {pendingBookings.length} pending booking{pendingBookings.length !== 1 ? 's' : ''}
-        </div>
-      </div>
 
-      {pendingBookings.length === 0 ? (
-        <div className="text-center py-12">
-          <CheckCircle className="w-16 h-16 mx-auto mb-4 text-green-300" />
-          <h3 className="text-lg font-medium text-gray-900 mb-2">All caught up!</h3>
-          <p className="text-gray-600">No pending student bookings at the moment.</p>
-        </div>
-      ) : (
-        <div className="space-y-4">
-          {groupBookingsBySchedule(pendingBookings).map((schedule) => {
-            const students = schedule.schedule_students || [];
-            return (
-              <div key={schedule.id} className="card hover:shadow-lg transition-shadow border-l-4 border-l-yellow-400">
-                <div className="flex justify-between items-start">
-                  <div className="flex-1">
-                    <div className="flex items-center space-x-3 mb-3">
-                      <Calendar className="w-5 h-5 text-emerald-600" />
-                      <div>
-                        <h4 className="font-semibold text-lg text-gray-900">
-                          {new Date(schedule.date).toLocaleDateString('en-US', {
-                            weekday: 'long',
-                            year: 'numeric',
-                            month: 'long',
-                            day: 'numeric'
-                          })}
-                        </h4>
-                        <p className="text-sm text-gray-600">
-                          {schedule.shift_start} - {schedule.shift_end} • {schedule.location}
-                        </p>
-                      </div>
-                    </div>
-
-                    <div className="bg-gray-50 p-3 rounded-lg mb-4">
-                      <p className="text-sm text-gray-600 mb-1">Schedule Details:</p>
-                      <p className="text-sm font-medium text-gray-900">{schedule.description}</p>
-                    </div>
-
-                    <div className="bg-blue-50 p-4 rounded-lg border border-blue-200">
-                      <div className="flex items-center space-x-2 mb-3">
-                        <Users className="w-4 h-4 text-blue-600" />
-                        <p className="font-medium text-blue-900">
-                          Students Assigned ({students.length}/{schedule.max_students || 2})
-                        </p>
-                      </div>
-                      <div className="space-y-2">
-                        {students.map((student, idx) => (
-                          <div key={student.id} className="flex items-center justify-between bg-white p-3 rounded border border-gray-200">
-                            <div className="flex items-center space-x-3 flex-1">
-                              <div className="w-8 h-8 bg-emerald-100 rounded-full flex items-center justify-center flex-shrink-0">
-                                <span className="text-emerald-700 text-xs font-medium">
-                                  {(student.profiles?.first_name?.[0] || '') + (student.profiles?.last_name?.[0] || '')}
-                                </span>
-                              </div>
-                              <div className="flex-1 min-w-0">
-                                <p className="text-sm font-medium text-gray-900 truncate">
-                                  {student.profiles?.first_name} {student.profiles?.last_name}
-                                </p>
-                                <p className="text-xs text-gray-600">{student.profiles?.student_number} • {student.profiles?.year_level}</p>
-                              </div>
-                              <div className="text-xs text-gray-500 hidden sm:block">
-                                Booked: {new Date(student.booking_time).toLocaleDateString()}
-                              </div>
-                            </div>
-
-                            {/* Individual student action buttons */}
-                            <div className="flex space-x-2 ml-4">
-                              <button
-                                onClick={() => handleApproveStudent(schedule.id, student.id, `${student.profiles?.first_name} ${student.profiles?.last_name}`)}
-                                className="flex items-center space-x-1 bg-green-600 hover:bg-green-700 text-white px-3 py-1 rounded transition-colors text-xs"
-                                title="Approve this student"
-                              >
-                                <Check className="w-3 h-3" />
-                                <span className="hidden sm:inline">Approve</span>
-                              </button>
-                              <button
-                                onClick={() => handleRejectStudent(schedule.id, student.id, `${student.profiles?.first_name} ${student.profiles?.last_name}`)}
-                                className="flex items-center space-x-1 bg-red-600 hover:bg-red-700 text-white px-3 py-1 rounded transition-colors text-xs"
-                                title="Reject this student"
-                              >
-                                <X className="w-3 h-3" />
-                                <span className="hidden sm:inline">Reject</span>
-                              </button>
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-
-                    <div className="mt-3 p-2 bg-yellow-50 rounded border border-yellow-200">
-                      <p className="text-xs text-yellow-800">
-                        💡 Tip: You can approve or reject students individually, or use the buttons on the right to approve/reject all students at once.
-                      </p>
-                    </div>
-                  </div>
-
-                  {/* Bulk action buttons */}
-                  <div className="flex flex-col space-y-2 ml-6">
-                    <button
-                      onClick={() => handleApproveAllStudents(schedule.id)}
-                      className="flex items-center space-x-2 bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded-lg transition-colors whitespace-nowrap"
-                    >
-                      <CheckCircle className="w-4 h-4" />
-                      <span>Approve All</span>
-                    </button>
-                    <button
-                      onClick={() => handleRejectAllStudents(schedule.id)}
-                      className="flex items-center space-x-2 bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-lg transition-colors whitespace-nowrap"
-                    >
-                      <XCircle className="w-4 h-4" />
-                      <span>Reject All</span>
-                    </button>
-                  </div>
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      )}
-    </div>
-  );
 
   // Helper to check if a duty shift has ended
   const isDutyOver = (schedule) => {
@@ -2981,8 +2871,6 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
     switch (activeTab) {
       case 'dashboard':
         return renderDashboardView();
-      case 'pending':
-        return renderPendingApprovalsView();
       case 'schedule':
         return renderCalendarView();
       case 'duties':
@@ -2998,7 +2886,7 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
       case 'profile':
         return <ProfileSettings user={user} onProfileUpdate={onProfileUpdate} />;
       case 'schedule-management':
-        return <ScheduleManagement />;
+        return <ScheduleManagement initialView={mgmtViewMode} />;
       case 'logs':
         return renderSystemLogsView();
       case 'child-duties':
@@ -3271,6 +3159,10 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
                         if (item.id === 'signout') {
                           handleSignOut();
                         } else {
+                          // Reset view mode if navigating to schedule management from sidebar
+                          if (item.id === 'schedule-management') {
+                            setMgmtViewMode('calendar');
+                          }
                           setActiveTab(item.id);
                         }
                         setSidebarOpen(false);

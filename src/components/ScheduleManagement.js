@@ -709,10 +709,17 @@ const LocationManagement = ({ locations, onSave }) => {
 
 /* ── Main Component ── */
 
-const ScheduleManagement = () => {
+const ScheduleManagement = ({ initialView = 'calendar' }) => {
   const [schedules, setSchedules] = useState([]);
   const [currentDate, setCurrentDate] = useState(new Date());
-  const [viewMode, setViewMode] = useState('calendar');
+  const [viewMode, setViewMode] = useState(initialView);
+
+  // Sync viewMode with initialView prop if it changes
+  useEffect(() => {
+    if (initialView) {
+      setViewMode(initialView);
+    }
+  }, [initialView]);
   const [bookingStatus, setBookingStatus] = useState('open');
   const [activeTab, setActiveTab] = useState('schedules'); // 'schedules' | 'locations'
   const [selectedHospital, setSelectedHospital] = useState('');
