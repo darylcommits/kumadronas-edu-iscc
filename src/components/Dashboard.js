@@ -567,43 +567,47 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
 
   const fetchPendingBookings = async () => {
     try {
-      console.log('Fetching pending schedule approvals...');
+      console.log('Fetching all pending student bookings...');
       const { data, error } = await supabase
-        .from('schedules')
+        .from('schedule_students')
         .select(`
           *,
-          schedule_students!inner (
-            id,
-            student_id,
-            booking_time,
-            status,
-            profiles:student_id (
-              id,
-              first_name,
-              last_name,
-              middle_initial,
-              email,
-              student_number,
-              year_level
-            )
+          schedules (
+            id, date, description, location, shift_start, shift_end, status, max_students
+          ),
+          profiles:student_id (
+            id, first_name, last_name, middle_initial, email, student_number, year_level, phone_number, created_at
           )
         `)
-        .eq('status', 'pending')
-        .eq('schedule_students.status', 'booked')
-        .order('date', { ascending: true });
+        .eq('status', 'booked')
+        .order('booking_time', { ascending: false });
 
       if (error) {
-        console.error('Error fetching pending schedules:', error);
+        console.error('Error fetching pending bookings:', error);
         return;
       }
 
-      console.log('Pending schedules with bookings:', data);
-
-      // Group schedules that have bookings awaiting approval
+      console.log('Pending bookings fetched:', data?.length || 0);
       setPendingBookings(data || []);
     } catch (error) {
       console.error('Error fetching pending bookings:', error);
     }
+  };
+
+  const groupBookingsBySchedule = (bookings) => {
+    const groups = {};
+    bookings.forEach(booking => {
+      const key = `${booking.schedule_id}`;
+      if (!groups[key]) {
+        groups[key] = {
+          id: booking.schedule_id, // For compatibility with existing render
+          schedule_students: [],   // For compatibility with existing render
+          ...booking.schedules     // Spread schedule info
+        };
+      }
+      groups[key].schedule_students.push(booking);
+    });
+    return Object.values(groups);
   };
 
   const fetchNotifications = async () => {
@@ -642,10 +646,10 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
           .select('id', { count: 'exact' })
           .eq('role', 'student');
 
-        const { data: pendingSchedules } = await supabase
-          .from('schedules')
+        const { data: bookedStudents } = await supabase
+          .from('schedule_students')
           .select('id', { count: 'exact' })
-          .eq('status', 'pending');
+          .eq('status', 'booked');
 
         const { data: todayDuties } = await supabase
           .from('schedule_students')
@@ -658,7 +662,7 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
 
         setDashboardStats({
           totalStudents: totalStudents?.length || 0,
-          pendingApprovals: pendingSchedules?.length || 0,
+          pendingApprovals: bookedStudents?.length || 0,
           todayDuties: todayDuties?.length || 0,
           systemHealth: 'Excellent'
         });
@@ -861,7 +865,7 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
     try {
       const schedule = schedules.find(s => s.id === scheduleId);
       if (!schedule) {
-        alert('Schedule not found.');
+        error('Schedule not found.');
         return;
       }
 
@@ -870,7 +874,7 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
       const maxStudents = schedule.max_students || 2;
 
       if (currentBookings >= maxStudents) {
-        alert(`This duty is already full (${currentBookings}/${maxStudents} students assigned).`);
+        error(`This duty is already full (${currentBookings}/${maxStudents} students assigned).`);
         return;
       }
 
@@ -1138,9 +1142,9 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
 
       success(`Schedule approved successfully for all ${bookings?.length || 0} student(s)!`);
 
-    } catch (error) {
-      console.error('Error approving schedule:', error);
-      error('Error approving schedule: ' + error.message);
+    } catch (err) {
+      console.error('Error approving schedule:', err);
+      error('Error approving schedule: ' + err.message);
     }
   };
 
@@ -1183,11 +1187,6 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
       }
 
       console.log('Current schedule status:', currentSchedule?.status);
-
-      if (currentSchedule?.status !== 'pending') {
-        alert(`This schedule is no longer pending (status: ${currentSchedule?.status}). Cannot approve.`);
-        return;
-      }
 
       console.log('🔵 Approving only this specific student booking...');
 
@@ -1307,9 +1306,9 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
 
       success(`✅ Duty approved for ${studentName}!\n\n📝 Individual booking approved.`);
 
-    } catch (error) {
-      console.error('❌ FULL ERROR:', error);
-      error('❌ Error approving student: ' + error.message);
+    } catch (err) {
+      console.error('❌ FULL ERROR:', err);
+      error('❌ Error approving student: ' + err.message);
     }
   };
 
@@ -1317,7 +1316,7 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
   const handleApproveAllStudents = (scheduleId) => {
     const schedule = pendingBookings.find(s => s.id === scheduleId);
     if (!schedule) {
-      alert('Schedule not found');
+      error('Schedule not found');
       return;
     }
     const studentCount = schedule.schedule_students?.length || 0;
@@ -1439,9 +1438,9 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
 
       success(`Schedule approved successfully for all ${bookings?.length || 0} student(s)!`);
 
-    } catch (error) {
-      console.error('Error approving schedule:', error);
-      alert('Error approving schedule: ' + error.message);
+    } catch (err) {
+      console.error('Error approving schedule:', err);
+      error('Error approving schedule: ' + err.message);
     }
   };
 
@@ -1886,7 +1885,9 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
               <div className="flex items-center justify-between h-full px-4">
                 <div className="flex-1">
                   <p className="text-emerald-200 text-xs font-medium uppercase tracking-wide">Pending Approvals</p>
-                  <p className="text-2xl font-bold mt-1">{pendingBookings.length}</p>
+                  <p className="text-2xl font-bold mt-1">
+                    {pendingBookings.length}
+                  </p>
                 </div>
                 <div className="flex-shrink-0 ml-3">
                   <Clock className="w-8 h-8 text-emerald-200 opacity-80" />
@@ -2084,7 +2085,7 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
           <p className="text-gray-600">Review and approve duty schedules - You can approve students individually or all at once</p>
         </div>
         <div className="bg-yellow-100 text-yellow-800 px-3 py-1 rounded-full text-sm font-medium">
-          {pendingBookings.length} pending schedule{pendingBookings.length !== 1 ? 's' : ''}
+          {pendingBookings.length} pending booking{pendingBookings.length !== 1 ? 's' : ''}
         </div>
       </div>
 
@@ -2092,11 +2093,11 @@ const Dashboard = ({ user, session, onProfileUpdate }) => {
         <div className="text-center py-12">
           <CheckCircle className="w-16 h-16 mx-auto mb-4 text-green-300" />
           <h3 className="text-lg font-medium text-gray-900 mb-2">All caught up!</h3>
-          <p className="text-gray-600">No pending schedule approvals at the moment.</p>
+          <p className="text-gray-600">No pending student bookings at the moment.</p>
         </div>
       ) : (
         <div className="space-y-4">
-          {pendingBookings.map((schedule) => {
+          {groupBookingsBySchedule(pendingBookings).map((schedule) => {
             const students = schedule.schedule_students || [];
             return (
               <div key={schedule.id} className="card hover:shadow-lg transition-shadow border-l-4 border-l-yellow-400">
